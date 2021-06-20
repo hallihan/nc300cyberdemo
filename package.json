@@ -1,0 +1,15 @@
+{
+  "name": "nc300cyberdemo",
+  "version": "0.0.1",
+  "description": "NC-300 Cyber Demo",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": "14.x"
+  },
+  "license": "MIT",
+  "keywords": [
+  ]
+}
