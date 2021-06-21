@@ -1,19 +1,18 @@
+// Imports
 const express = require("express");
 const http = require("http");
 const socketIo = require("socket.io");
 const path = require('path');
+var cors = require('cors');
 
 const port = process.env.PORT || 80;
 const app = express();
-var cors = require('cors');
-app.use(express.static(path.join(__dirname, 'build')));
-
-app.get('/', function (req, res) {
-  res.sendFile(path.join(__dirname, 'build', 'index.html'));
-});
 app.use(cors());
 
-    
+var entries = {
+
+}
+
 const server = http.createServer(app, {
     cors: {
         origin: "*",
@@ -21,84 +20,147 @@ const server = http.createServer(app, {
     }
 });
 
-var clients = []
+// Data
+let board = [
+    {votes: 0, state: ''}, {votes: 0, state: ''}, {votes: 0, state: ''},
+    {votes: 0, state: ''}, {votes: 0, state: ''}, {votes: 0, state: ''},
+    {votes: 0, state: ''}, {votes: 0, state: ''}, {votes: 0, state: ''}
+]
+let time = 0
+let dirty = false
+let gameActive = false
+let collectiveTurn = true
+let end = false;
+let ending
 
-var data = {
-    personTurn: false,
-    time: 20,
-    board: [
-        0, 0, 0,
-        0, 0, 0,
-        0, 0, 0
-    ],
-    results: [
-        0, 0, 0,
-        0, 0, 0,
-        0, 0, 0
-    ]
-}
-JSON.safeStringify = (obj, indent = 2) => {
-    let cache = [];
-    const retVal = JSON.stringify(
-      obj,
-      (key, value) =>
-        typeof value === "object" && value !== null
-          ? cache.includes(value)
-            ? undefined // Duplicate reference found, discard key
-            : cache.push(value) && value // Store value in our collection
-          : value,
-      indent
-    );
-    cache = null;
-    return retVal;
-  };
+// Socket
+let clients = []
 
 const io = socketIo(server); // < Interesting!
 io.on("connection", (socket) => {
-    socket.send(JSON.stringify(data))
+    console.log("Client connected")
     clients.push(socket)
+    socket.send({type: "status", gameActive: gameActive})
+    clients.forEach(sock=>sock.send({type: "turn", collectiveTurn: collectiveTurn}))
+    if(end) {clients.forEach(sock=>sock.send({type: "ending", ending: ending}))}
+    dirty = true
+
+
+    clients.forEach(sock=>sock.send({type: "entries", entries: entries}))
+
+
+
     socket.on("message", (m)=> {
         var d = JSON.parse(m)
-        data.board[d.vote]++
-        if(d.adminVote) {
-            data.results[d.adminVote] = 2
-            data.personTurn = false
-            data.time = 10
+        if(d.type == "vote") {
+            if(board[d.tile].state == "" && collectiveTurn) {
+                board[d.tile].votes++
+                dirty = true
+            }
+        }
+        if(d.type == "start") {
+            gameActive = true;
+            time = 10;
+            clients.forEach(sock=>sock.send({type: "status", gameActive: gameActive}))
+        }
+        if(d.type == "ending") {
+            end = true;
+            ending = d.ending
+            board.forEach(t=>t.votes = 0)
+            clients.forEach(sock=>sock.send({type: "board", board: board}))
+            clients.forEach(sock=>sock.send({type: "ending", ending: ending}))
+            clients.forEach(sock=>sock.send({type: "entries", entries: entries}))
+        }
+        if(d.type == "admin_vote") {
+            if(board[d.tile].state == "" && !collectiveTurn) {
+                board[d.tile].state = "o"
+                dirty = true
+                collectiveTurn = true;
+                time = 10;
+                clients.forEach(sock=>sock.send({type: "turn", collectiveTurn: collectiveTurn}))
+            }
+        }
+        if(d.type == "entry") {
+            console.log(JSON.stringify(d))
+            entries[d.ip] = d
+        }
+        if(d.type == "restart") {
+            board.forEach((t)=>{
+                t.votes = 0;
+                t.state = 0;
+            })
+            time = 0;
+            dirty = true;
+            gameActive = false;
+            end = false;
+            ending = "";
+            collectiveTurn = true;
+            clients.forEach(sock=>sock.send({type: "status", gameActive: gameActive}))
+            clients.forEach(sock=>sock.send({type: "turn", collectiveTurn: collectiveTurn}))
+            clients.forEach(sock=>sock.send({type: "ending", ending: ""}))
+
         }
     })
     socket.on("disconnect", () => {
+        clients = clients.filter(item => item !== socket)
         console.log("Client disconnected");
     });
 });
 
+const findHighestTile = () => {
+    var highestVotes = -1
+    var highestTile = board[0]
+    board.forEach((tile)=>{
+        if(tile.votes > highestVotes) {
+            highestVotes = tile.votes
+            highestTile = tile
+        } 
+    })
+    return highestTile
+}
+
+var previousTime = 0
+setInterval(() => {
+    if(!end) {
+        if(dirty) {
+            dirty = false
+            clients.forEach(sock=>sock.send({type: "board", board: board}))
+        }
+        if(time > 0 && gameActive) time --
+        if(time != previousTime) clients.forEach(sock=>sock.send({type: "time", time: time}))
+        previousTime = time
+        if(time == 0 && collectiveTurn && gameActive) {
+            
+            findHighestTile().state = "x"
+            board.forEach((x)=>{x.votes = 0})
+            clients.forEach(sock=>sock.send({type: "board", board: board}))
+
+            collectiveTurn = false;
+            clients.forEach(sock=>sock.send({type: "turn", collectiveTurn: collectiveTurn}))
+        }
+    }
+}, 1000);
+
+
+// app.use(express.static(path.join(__dirname, 'build')));
+
+app.get('/', function(req, res) {
+    res.sendFile(path.join(__dirname, '/index.html'));
+});
 
 server.listen(port, () => console.log(`Listening on port ${port}`));
-function indexOfMax(arr) {
-    if (arr.length === 0) {
-        return -1;
-    }
 
-    var max = arr[0];
-    var maxIndex = 0;
 
-    for (var i = 1; i < arr.length; i++) {
-        if (arr[i] > max) {
-            maxIndex = i;
-            max = arr[i];
+
+
+Object.filter = function( obj, predicate) {
+    let result = {}, key;
+
+    for (key in obj) {
+        if (obj.hasOwnProperty(key) && !predicate(obj[key])) {
+            result[key] = obj[key];
         }
     }
 
-    return maxIndex;
-}
-
-setInterval(()=>{
-    if(data.time > 0) data.time-=1
-    if(data.time == 0 && !data.personTurn) { 
-        data.personTurn = true
-        data.results[indexOfMax(data.board)]=1
-        data.board = [0,0,0,0,0,0,0,0,0]
-    } 
-    clients.forEach((socket)=>{
-        socket.send(JSON.stringify(data))
-    })
-}, 1000)
+    return result;
+};
