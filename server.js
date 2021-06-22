@@ -145,11 +145,11 @@ app.get('/', function(req, res) {
     res.sendFile(path.join(__dirname, '/index.html'));
 });
 
-app.get('/build/build.js', function(req, res) {
+app.get('/build/bundle.js', function(req, res) {
   res.sendFile(path.join(__dirname, '/build/bundle.js'));
 });
 
-app.get('/build/build.css', function(req, res) {
+app.get('/build/bundle.css', function(req, res) {
   res.sendFile(path.join(__dirname, '/build/bundle.css'));
 });
 
