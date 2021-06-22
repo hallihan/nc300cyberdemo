@@ -141,11 +141,20 @@ setInterval(() => {
     }
 }, 1000);
 
-
-app.use('/build', express.static(path.join(__dirname, '/build')));
-
 app.get('/', function(req, res) {
     res.sendFile(path.join(__dirname, '/index.html'));
+});
+
+app.get('/build/build.js', function(req, res) {
+  res.sendFile(path.join(__dirname, '/build/bundle.js'));
+});
+
+app.get('/build/build.css', function(req, res) {
+  res.sendFile(path.join(__dirname, '/build/bundle.css'));
+});
+
+app.get('/global.css', function(req, res) {
+  res.sendFile(path.join(__dirname, '/global.css'));
 });
 
 server.listen(port, () => console.log(`Listening on port ${port}`));
