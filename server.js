@@ -100,6 +100,11 @@ io.on("connection", (socket) => {
             clients.forEach(sock=>sock.send({type: "ending", ending: ""}))
 
         }
+        if(d.type == "reset_entries") {
+            entries = {}
+            clients.forEach(sock=>sock.send({type: "entries", entries: entries}))
+
+        }
     })
     socket.on("disconnect", () => {
         clients = clients.filter(item => item !== socket)
@@ -111,7 +116,7 @@ const findHighestTile = () => {
     var highestVotes = -1
     var highestTile = board[0]
     board.forEach((tile)=>{
-        if(tile.votes > highestVotes) {
+        if(tile.votes > highestVotes && tile.state == "") {
             highestVotes = tile.votes
             highestTile = tile
         } 
