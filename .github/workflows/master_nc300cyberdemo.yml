@@ -19,21 +19,19 @@ jobs:
       - name: Set up Node.js version
         uses: actions/setup-node@v1
         with:
-          node-version: '16.x'
+          node-version: '18.x'
 
       - name: npm install, build, and test
         run: |
           npm install
           npm run build --if-present
           npm run test --if-present
-      - name: 'Tar files'
-        run: tar -cvf node-app.tar .
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v2
         with:
           name: node-app
-          path: ./node-app.tar
+          path: .
 
   deploy:
     runs-on: ubuntu-latest
@@ -48,14 +46,11 @@ jobs:
         with:
           name: node-app
 
-      - name: 'Untar files'
-        run: tar -xvf node-app.tar
-      
       - name: 'Deploy to Azure Web App'
         id: deploy-to-webapp
         uses: azure/webapps-deploy@v2
         with:
           app-name: 'nc300cyberdemo'
           slot-name: 'Production'
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_92B5CDC38D3140A09B7A6747D955B2FB }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_A713E9B15BE046E1A48B4D6AF439B0D4 }}
           package: .
