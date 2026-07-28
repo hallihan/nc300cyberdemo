@@ -25,6 +25,11 @@
 	let collectiveTurn = $state(true);
 	let ending = $state('');
 
+	// Round/tracking stats, pushed by the server.
+	let tracked = $state(0);
+	let voted = $state(0);
+	let entryCount = $state(0);
+
 	let socket;
 
 	// Read once at load. There is deliberately no hashchange listener, so
@@ -32,6 +37,7 @@
 	const admin = window.location.hash == '#admin';
 
 	const totalVotes = $derived(board.map((x) => x.votes).reduce((a, b) => a + b, 0));
+	const votedPct = $derived(tracked > 0 ? Math.round((voted / tracked) * 100) : 0);
 	const resultText = $derived(
 		ending == 'x' ? "X's win!" : ending == 'o' ? "O's win!" : 'Stalemate!'
 	);
@@ -45,6 +51,10 @@
 	const socketLoad = (sock) => {
 		socket = sock;
 		console.log('Socket loaded!');
+
+		// The server can't see the #admin hash, and needs to know so the admin's
+		// own connection is excluded from the tracked-user count.
+		sock.send(JSON.stringify({ type: 'identify', admin }));
 
 		collectEntry((payload) => sock.send(JSON.stringify(payload)));
 
@@ -61,6 +71,11 @@
 			if (res.type == 'turn') collectiveTurn = res.collectiveTurn;
 			if (res.type == 'ending') ending = res.ending;
 			if (res.type == 'entries' && admin) entries = res.entries;
+			if (res.type == 'stats') {
+				tracked = res.tracked;
+				voted = res.voted;
+				entryCount = res.entries;
+			}
 		});
 	};
 
@@ -131,6 +146,19 @@
 			{:else}
 				<div class="noactive">{resultText}</div>
 			{/if}
+		{/if}
+
+		{#if admin}
+			<div class="stats">
+				<span>Tracked users <strong>{tracked}</strong></span>
+				<span class="sep">·</span>
+				<span>
+					Voted this round <strong>{voted}</strong>/{tracked}
+					<span class="pct" class:full={tracked > 0 && voted >= tracked}>({votedPct}%)</span>
+				</span>
+				<span class="sep">·</span>
+				<span>Devices captured <strong>{entryCount}</strong></span>
+			</div>
 		{/if}
 
 		<div class="board">
@@ -232,6 +260,35 @@
 		background: #2e3440;
 		touch-action: manipulation;
 		flex-direction: column;
+	}
+
+	.stats {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		gap: 0.5em;
+		margin-bottom: 10px;
+		font-size: 13px;
+		color: #d8dee9;
+		letter-spacing: 0.02em;
+	}
+
+	.stats strong {
+		color: #eceff4;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.sep {
+		opacity: 0.4;
+	}
+
+	.pct {
+		opacity: 0.7;
+	}
+
+	.pct.full {
+		color: #00ff95;
+		opacity: 1;
 	}
 
 	.board {

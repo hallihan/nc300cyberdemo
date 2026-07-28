@@ -38,7 +38,22 @@ async function boot({ hash = '', connect = true } = {}) {
 	await new Promise((r) => httpServer.listen(0, '127.0.0.1', r));
 	const { port } = httpServer.address();
 
-	const connected = new Promise((resolve) => ioServer.on('connection', resolve));
+	/** everything the client sent, split by kind */
+	const sent = [];
+	const entries = [];
+
+	// Attach the message listener inside the connection handler, before
+	// resolving: the client sends `identify` the instant it connects, and a
+	// listener attached after the await could miss it.
+	const connected = new Promise((resolve) =>
+		ioServer.on('connection', (sock) => {
+			sock.on('message', (raw) => {
+				const msg = JSON.parse(raw);
+				(msg.type === 'entry' ? entries : sent).push(msg);
+			});
+			resolve(sock);
+		})
+	);
 
 	const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', {
 		url: `http://127.0.0.1:${port}/${hash}`,
@@ -55,14 +70,6 @@ async function boot({ hash = '', connect = true } = {}) {
 	if (!connect) return { window, port, httpServer };
 
 	const serverSocket = await connected;
-
-	/** everything the client sent, split by kind */
-	const sent = [];
-	const entries = [];
-	serverSocket.on('message', (raw) => {
-		const msg = JSON.parse(raw);
-		(msg.type === 'entry' ? entries : sent).push(msg);
-	});
 
 	const flush = () => new Promise((r) => setTimeout(r, 20));
 	const recv = async (msg) => {
@@ -106,6 +113,50 @@ describe('connection lifecycle', () => {
 		assert.equal(e.location, 'unknown');
 		assert.equal(e.battery, 'blocked', 'jsdom has no Battery API');
 		assert.ok(e.darkMode === 'Dark' || e.darkMode === 'Light');
+	});
+});
+
+describe('identify + round stats', () => {
+	test('a normal client identifies itself as non-admin', async () => {
+		const { sent } = await boot();
+		assert.deepEqual(sent[0], { type: 'identify', admin: false });
+	});
+
+	test('an #admin client identifies itself as admin', async () => {
+		const { sent } = await boot({ hash: '#admin' });
+		assert.deepEqual(sent[0], { type: 'identify', admin: true });
+	});
+
+	test('admin sees tracked users, round votes and device count', async () => {
+		const { recv, text } = await boot({ hash: '#admin' });
+		await recv({ type: 'stats', tracked: 12, voted: 7, entries: 9 });
+		const t = text();
+		assert.match(t, /Tracked users 12/);
+		assert.match(t, /Voted this round 7\/12/);
+		assert.match(t, /\(58%\)/, '7/12 rounds to 58%');
+		assert.match(t, /Devices captured 9/);
+	});
+
+	test('the percentage is highlighted at 100%', async () => {
+		const { recv, $ } = await boot({ hash: '#admin' });
+		await recv({ type: 'stats', tracked: 5, voted: 4, entries: 0 });
+		assert.equal($('.pct.full').length, 0, 'not highlighted below 100%');
+		await recv({ type: 'stats', tracked: 5, voted: 5, entries: 0 });
+		assert.equal($('.pct.full').length, 1, 'highlighted at 100%');
+	});
+
+	test('avoids dividing by zero when nobody is tracked', async () => {
+		const { recv, text, $ } = await boot({ hash: '#admin' });
+		await recv({ type: 'stats', tracked: 0, voted: 0, entries: 0 });
+		assert.match(text(), /\(0%\)/);
+		assert.equal($('.pct.full').length, 0, '0/0 must not read as complete');
+	});
+
+	test('non-admin never sees the stats bar', async () => {
+		const { recv, text, $ } = await boot();
+		await recv({ type: 'stats', tracked: 12, voted: 7, entries: 9 });
+		assert.equal($('.stats').length, 0);
+		assert.doesNotMatch(text(), /Tracked users/);
 	});
 });
 
