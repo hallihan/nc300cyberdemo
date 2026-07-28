@@ -23,11 +23,20 @@ jobs:
           # and Vite 8 needs >=20.19, so 24.x satisfies the whole toolchain.
           node-version: '24.x'
 
-      - name: npm install, build, and test
+      - name: Install, build, and test
+        # npm ci needs the committed package-lock.json and installs exactly
+        # what it pins. build/ is no longer committed, so this step is what
+        # produces the bundle the deploy ships.
         run: |
-          npm install
-          npm run build --if-present
-          npm run test --if-present
+          npm ci
+          npm run build
+          npm test
+
+      - name: Prune dev dependencies
+        # svelte, vite, jsdom and ua-parser-js are build-time only. Pruning
+        # here keeps them out of the deployed artifact; it must run after the
+        # tests, which need them.
+        run: npm prune --omit=dev
 
       - name: 'Tar files'
         # Build the archive outside the tree being archived, then move it in.
