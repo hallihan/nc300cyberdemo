@@ -194,19 +194,6 @@
 			{/each}
 		</div>
 
-		{#if gameActive && admin}
-			<div class="bc">
-				<button class="button-w lb" onclick={() => send({ type: 'ending', ending: 'x' })}>
-					X Wins
-				</button>
-				<button class="button-w mb" onclick={() => send({ type: 'ending', ending: 'o' })}>
-					O Wins
-				</button>
-				<button class="button-w rb" onclick={() => send({ type: 'ending', ending: 's' })}>
-					Stalemate
-				</button>
-			</div>
-		{/if}
 	{:else}
 		<p class="">Connecting...</p>
 	{/if}
@@ -219,37 +206,6 @@
 		background: none;
 		border: 2px solid #00ff95;
 		border-radius: 8px;
-	}
-
-	.button-w {
-		cursor: pointer;
-		color: #00ff95;
-		background: none;
-		border: 2px solid #00ff95;
-		border-radius: 8px;
-		display: inline-block;
-		margin: 0;
-	}
-
-	.bc {
-		display: flex;
-		flex-direction: row;
-		margin-top: 10px;
-		font-size: 1.5em;
-	}
-
-	.button-w:active {
-		background: none;
-	}
-
-	.lb {
-		border-radius: 8px 0px 0px 8px;
-	}
-	.mb {
-		border-radius: 0px 0px 0px 0px;
-	}
-	.rb {
-		border-radius: 0px 8px 8px 0px;
 	}
 
 	.button-p:active {

@@ -318,23 +318,15 @@ describe('admin view (#admin)', () => {
 		assert.doesNotMatch(text(), /Start Easy|Start Medium|Start Difficult/);
 	});
 
-	test('shows the three ending buttons while the game is active', async () => {
-		const { recv, text } = await boot({ hash: '#admin' });
+	test('the manual X Wins / O Wins / Stalemate controls are gone', async () => {
+		// The server detects the result itself, so these are redundant.
+		const { recv, text, $ } = await boot({ hash: '#admin' });
 		await recv({ type: 'status', gameActive: true });
 		const t = text();
-		assert.match(t, /X Wins/);
-		assert.match(t, /O Wins/);
-		assert.match(t, /Stalemate/);
-	});
-
-	test('ending buttons send the right codes', async () => {
-		const { recv, sent, button, flush } = await boot({ hash: '#admin' });
-		await recv({ type: 'status', gameActive: true });
-		for (const [label, code] of [['X Wins', 'x'], ['O Wins', 'o'], ['Stalemate', 's']]) {
-			button(label).click();
-			await flush();
-			assert.deepEqual(sent.at(-1), { type: 'ending', ending: code });
-		}
+		assert.doesNotMatch(t, /X Wins/);
+		assert.doesNotMatch(t, /O Wins/);
+		assert.doesNotMatch(t, /Stalemate/);
+		assert.equal($('.bc').length, 0, 'the button row is removed entirely');
 	});
 
 	test('the admin only spectates — the computer plays O', async () => {

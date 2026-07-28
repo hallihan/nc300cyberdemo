@@ -423,7 +423,9 @@ describe('stale players', () => {
 });
 
 describe('result detection', () => {
-	test('the manual override buttons still work', async () => {
+	// The UI controls are gone, but the protocol message remains — a deliberate
+	// escape hatch, and one more thing for a curious student to find.
+	test('a forced ending is still accepted over the socket', async () => {
 		const ctx = await startServer();
 		const admin = await connect(ctx, { admin: true });
 		await connect(ctx);
