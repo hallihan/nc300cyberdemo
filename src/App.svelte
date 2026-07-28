@@ -28,7 +28,6 @@
 	// Round/tracking stats, pushed by the server.
 	let tracked = $state(0);
 	let voted = $state(0);
-	let entryCount = $state(0);
 
 	let socket;
 
@@ -74,7 +73,6 @@
 			if (res.type == 'stats') {
 				tracked = res.tracked;
 				voted = res.voted;
-				entryCount = res.entries;
 			}
 		});
 	};
@@ -150,14 +148,10 @@
 
 		{#if admin}
 			<div class="stats">
-				<span>Tracked users <strong>{tracked}</strong></span>
-				<span class="sep">·</span>
 				<span>
 					Voted this round <strong>{voted}</strong>/{tracked}
 					<span class="pct" class:full={tracked > 0 && voted >= tracked}>({votedPct}%)</span>
 				</span>
-				<span class="sep">·</span>
-				<span>Current Players <strong>{entryCount}</strong></span>
 			</div>
 		{/if}
 
@@ -276,10 +270,6 @@
 	.stats strong {
 		color: #eceff4;
 		font-variant-numeric: tabular-nums;
-	}
-
-	.sep {
-		opacity: 0.4;
 	}
 
 	.pct {

@@ -127,14 +127,14 @@ describe('identify + round stats', () => {
 		assert.deepEqual(sent[0], { type: 'identify', admin: true });
 	});
 
-	test('admin sees tracked users, round votes and device count', async () => {
+	test('admin sees only the round vote progress', async () => {
 		const { recv, text } = await boot({ hash: '#admin' });
 		await recv({ type: 'stats', tracked: 12, voted: 7, entries: 9 });
 		const t = text();
-		assert.match(t, /Tracked users 12/);
 		assert.match(t, /Voted this round 7\/12/);
 		assert.match(t, /\(58%\)/, '7/12 rounds to 58%');
-		assert.match(t, /Current Players 9/);
+		assert.doesNotMatch(t, /Tracked users/, 'separate label removed');
+		assert.doesNotMatch(t, /Current Players/, 'separate label removed');
 	});
 
 	test('the percentage is highlighted at 100%', async () => {
@@ -156,7 +156,7 @@ describe('identify + round stats', () => {
 		const { recv, text, $ } = await boot();
 		await recv({ type: 'stats', tracked: 12, voted: 7, entries: 9 });
 		assert.equal($('.stats').length, 0);
-		assert.doesNotMatch(text(), /Tracked users/);
+		assert.doesNotMatch(text(), /Voted this round/);
 	});
 });
 

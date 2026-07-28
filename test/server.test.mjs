@@ -65,6 +65,20 @@ async function connect(ctx, { admin = false } = {}) {
 
 const settle = () => new Promise((r) => setTimeout(r, 150));
 
+/**
+ * Polls until `fn` returns something truthy. Board updates are only flushed on
+ * the server's 1s dirty tick, so they can't be awaited with a fixed settle.
+ */
+async function waitFor(fn, label = 'condition', ms = 4000) {
+	const started = Date.now();
+	while (Date.now() - started < ms) {
+		const value = fn();
+		if (value) return value;
+		await new Promise((r) => setTimeout(r, 50));
+	}
+	throw new Error(`timed out waiting for ${label}`);
+}
+
 describe('tracked users', () => {
 	test('the admin is excluded from the tracked count', async () => {
 		const ctx = await startServer();
@@ -142,6 +156,53 @@ describe('unique voters per round', () => {
 		assert.ok(Date.now() - started < 2000, 'resolved immediately, not on the timer');
 		assert.equal(admin.last('turn').collectiveTurn, false, 'handed over to the admin');
 		assert.equal(admin.last('board').board[4].state, 'x', 'most-voted tile claimed');
+	});
+
+	test('spamming votes never ends the round early for everyone else', async () => {
+		const ctx = await startServer();
+		const admin = await connect(ctx, { admin: true });
+		const spammer = await connect(ctx);
+		const quiet = await connect(ctx); // has not voted yet
+		admin.send({ type: 'start' });
+		await settle();
+
+		for (let n = 0; n < 15; n++) spammer.send({ type: 'vote', tile: 0 });
+		await settle();
+
+		assert.equal(admin.last('stats').voted, 1, 'one voter however many clicks');
+		assert.equal(
+			admin.last('turn').collectiveTurn,
+			true,
+			'round must stay open while a player has not voted'
+		);
+		const board = await waitFor(() => admin.last('board'), 'a board broadcast');
+		assert.ok(
+			board.board[0].votes > 1,
+			'the tile total did run up — only the early close is protected'
+		);
+
+		// the quiet player finally votes -> now everyone has had a turn
+		quiet.send({ type: 'vote', tile: 4 });
+		await settle();
+		assert.equal(admin.last('turn').collectiveTurn, false, 'now it resolves');
+	});
+
+	test('a spammer cannot resolve a round alone by out-voting the board', async () => {
+		const ctx = await startServer();
+		const admin = await connect(ctx, { admin: true });
+		const spammer = await connect(ctx);
+		await connect(ctx);
+		await connect(ctx); // three tracked players, only one votes
+		admin.send({ type: 'start' });
+		await settle();
+
+		for (let n = 0; n < 30; n++) spammer.send({ type: 'vote', tile: n % 9 });
+		await settle();
+
+		const stats = admin.last('stats');
+		assert.equal(stats.voted, 1);
+		assert.equal(stats.tracked, 3);
+		assert.equal(admin.last('turn').collectiveTurn, true, 'still open at 1/3');
 	});
 
 	test('the voted count resets for the next round', async () => {
