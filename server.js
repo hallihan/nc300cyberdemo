@@ -7,6 +7,8 @@ var cors = require('cors');
 const { outcome, highestTile } = require('./lib/game');
 
 const port = process.env.PORT || 80;
+// Seconds the crowd gets to vote each round. Override to tune the demo pace.
+const roundSeconds = Number(process.env.ROUND_SECONDS) || 10;
 const app = express();
 app.use(cors());
 
@@ -37,15 +39,32 @@ let clients = []
 // a player gets one counted vote per round no matter how many tiles they click.
 let votedThisRound = new Set()
 
+// Sockets still considered engaged. A player who sits a round out drops out of
+// here and stops holding up the early close, until they vote again. New
+// connections start active so they get one round's grace to join in.
+let activePlayers = new Set()
+
 const broadcast = (msg) => clients.forEach(sock => sock.send(msg))
+
+const isPlayer = (sock) => !sock.isAdmin
 
 // The admin's own connection must not count toward the total, or 100% could
 // never be reached. Clients declare themselves on connect.
-const trackedCount = () => clients.filter(sock => !sock.isAdmin).length
+const activeCount = () =>
+    clients.filter(sock => isPlayer(sock) && activePlayers.has(sock.id)).length
+
+const markActive = (socket) => {
+    activePlayers.add(socket.id)
+}
+
+// Everyone connected gets a clean slate at the start of a game.
+const resetActivePlayers = () => {
+    activePlayers = new Set(clients.filter(isPlayer).map(sock => sock.id))
+}
 
 const sendStats = () => broadcast({
     type: "stats",
-    tracked: trackedCount(),
+    tracked: activeCount(),
     voted: votedThisRound.size,
     entries: Object.keys(entries).length
 })
@@ -55,6 +74,7 @@ io.on("connection", (socket) => {
     console.log("Client connected")
     socket.isAdmin = false
     clients.push(socket)
+    markActive(socket)
     socket.send({type: "status", gameActive: gameActive})
     broadcast({type: "turn", collectiveTurn: collectiveTurn})
     if(end) {broadcast({type: "ending", ending: ending})}
@@ -67,6 +87,7 @@ io.on("connection", (socket) => {
         var d = JSON.parse(m)
         if(d.type == "identify") {
             socket.isAdmin = !!d.admin
+            if(socket.isAdmin) activePlayers.delete(socket.id)
             sendStats()
         }
         if(d.type == "vote") {
@@ -75,9 +96,10 @@ io.on("connection", (socket) => {
                 dirty = true
                 if(!socket.isAdmin) {
                     votedThisRound.add(socket.id)
+                    markActive(socket) // voting re-engages a player who sat out
                     sendStats()
-                    // Everyone has had their say — no reason to keep counting down.
-                    if(gameActive && trackedCount() > 0 && votedThisRound.size >= trackedCount()) {
+                    // Everyone still engaged has had their say.
+                    if(gameActive && activeCount() > 0 && votedThisRound.size >= activeCount()) {
                         resolveCollectiveTurn()
                     }
                 }
@@ -85,8 +107,9 @@ io.on("connection", (socket) => {
         }
         if(d.type == "start") {
             gameActive = true;
-            time = 10;
+            time = roundSeconds;
             votedThisRound = new Set()
+            resetActivePlayers()
             broadcast({type: "status", gameActive: gameActive})
             sendStats()
         }
@@ -98,7 +121,7 @@ io.on("connection", (socket) => {
                 board[d.tile].state = "o"
                 dirty = true
                 collectiveTurn = true;
-                time = 10;
+                time = roundSeconds;
                 votedThisRound = new Set()
                 broadcast({type: "turn", collectiveTurn: collectiveTurn})
                 sendStats()
@@ -120,6 +143,7 @@ io.on("connection", (socket) => {
             ending = "";
             collectiveTurn = true;
             votedThisRound = new Set()
+            resetActivePlayers()
             broadcast({type: "board", board: board})
             broadcast({type: "status", gameActive: gameActive})
             broadcast({type: "turn", collectiveTurn: collectiveTurn})
@@ -135,6 +159,7 @@ io.on("connection", (socket) => {
     socket.on("disconnect", () => {
         clients = clients.filter(item => item !== socket)
         votedThisRound.delete(socket.id)
+        activePlayers.delete(socket.id)
         console.log("Client disconnected");
         sendStats()
     });
@@ -169,6 +194,11 @@ const resolveCollectiveTurn = () => {
     board.forEach((x)=>{x.votes = 0})
     broadcast({type: "board", board: board})
 
+    // Anyone who sat this round out stops counting toward the next one. They
+    // rejoin the moment they vote again.
+    clients.forEach(sock => {
+        if(isPlayer(sock) && !votedThisRound.has(sock.id)) activePlayers.delete(sock.id)
+    })
     votedThisRound = new Set()
     if(checkOutcome()) {
         sendStats()

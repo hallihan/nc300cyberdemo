@@ -18,11 +18,16 @@ afterEach(() => {
 });
 
 /** Boots server.js on a random port and waits for it to listen. */
-async function startServer() {
+async function startServer({ roundSeconds } = {}) {
 	const port = 20000 + Math.floor(Math.random() * 20000);
 	const proc = spawn('node', ['server.js'], {
 		cwd: new URL('..', import.meta.url).pathname,
-		env: { ...process.env, PORT: String(port) },
+		env: {
+			...process.env,
+			PORT: String(port),
+			// Tests that need a round to time out set this so they don't wait 10s.
+			...(roundSeconds ? { ROUND_SECONDS: String(roundSeconds) } : {})
+		},
 		stdio: ['ignore', 'pipe', 'pipe']
 	});
 	await new Promise((resolve, reject) => {
@@ -219,6 +224,102 @@ describe('unique voters per round', () => {
 		admin.send({ type: 'admin_vote', tile: 8 });
 		await settle();
 		assert.equal(admin.last('stats').voted, 0, 'still zero at the start of the new round');
+	});
+});
+
+describe('stale players', () => {
+	// These let a round expire on the timer, which is the only path that prunes.
+	const opts = { roundSeconds: 1 };
+
+	test('a player who sits out a round stops counting in the next one', async () => {
+		const ctx = await startServer(opts);
+		const admin = await connect(ctx, { admin: true });
+		const keen = await connect(ctx);
+		await connect(ctx); // never votes
+		admin.send({ type: 'start' });
+		await settle();
+		assert.equal(admin.last('stats').tracked, 2, 'both players start engaged');
+
+		// Round 1 expires on the timer with only `keen` voting.
+		keen.send({ type: 'vote', tile: 0 });
+		await waitFor(() => admin.last('turn')?.collectiveTurn === false, 'round 1 to resolve');
+
+		// Round 2: the idler has been dropped.
+		admin.send({ type: 'admin_vote', tile: 8 });
+		await settle();
+		assert.equal(admin.last('stats').tracked, 1, 'idler no longer holds up the round');
+
+		// So one vote is now 100% and resolves immediately.
+		const started = Date.now();
+		keen.send({ type: 'vote', tile: 1 });
+		await settle();
+		assert.equal(admin.last('turn').collectiveTurn, false);
+		assert.ok(Date.now() - started < 900, 'resolved on the vote, not the 1s timer');
+	});
+
+	test('voting again re-engages a dropped player', async () => {
+		const ctx = await startServer(opts);
+		const admin = await connect(ctx, { admin: true });
+		const keen = await connect(ctx);
+		const returner = await connect(ctx);
+		admin.send({ type: 'start' });
+		await settle();
+
+		keen.send({ type: 'vote', tile: 0 });
+		await waitFor(() => admin.last('turn')?.collectiveTurn === false, 'round 1 to resolve');
+		admin.send({ type: 'admin_vote', tile: 8 });
+		await settle();
+		assert.equal(admin.last('stats').tracked, 1, 'returner was dropped');
+
+		returner.send({ type: 'vote', tile: 2 });
+		await settle();
+		const stats = admin.last('stats');
+		assert.equal(stats.tracked, 2, 'voting puts them back in the count');
+		assert.equal(stats.voted, 1, 'and counts their vote');
+		assert.equal(admin.last('turn').collectiveTurn, true, 'round stays open for keen');
+	});
+
+	test('a new game re-engages everyone', async () => {
+		const ctx = await startServer(opts);
+		const admin = await connect(ctx, { admin: true });
+		const keen = await connect(ctx);
+		await connect(ctx); // idles all game
+		admin.send({ type: 'start' });
+		await settle();
+
+		keen.send({ type: 'vote', tile: 0 });
+		await waitFor(() => admin.last('turn')?.collectiveTurn === false, 'round 1 to resolve');
+		admin.send({ type: 'admin_vote', tile: 8 });
+		await settle();
+		assert.equal(admin.last('stats').tracked, 1, 'idler dropped mid-game');
+
+		admin.send({ type: 'restart' });
+		await settle();
+		assert.equal(admin.last('stats').tracked, 2, 'restart gives everyone a clean slate');
+
+		admin.send({ type: 'start' });
+		await settle();
+		assert.equal(admin.last('stats').tracked, 2, 'and so does start');
+	});
+
+	test('a player joining mid-game is given a round of grace', async () => {
+		const ctx = await startServer(opts);
+		const admin = await connect(ctx, { admin: true });
+		const keen = await connect(ctx);
+		admin.send({ type: 'start' });
+		await settle();
+		assert.equal(admin.last('stats').tracked, 1);
+
+		await connect(ctx); // arrives without voting
+		await settle();
+		assert.equal(admin.last('stats').tracked, 2, 'newcomer counts immediately');
+
+		// and is dropped only after actually sitting a round out
+		keen.send({ type: 'vote', tile: 0 });
+		await waitFor(() => admin.last('turn')?.collectiveTurn === false, 'round to resolve');
+		admin.send({ type: 'admin_vote', tile: 8 });
+		await settle();
+		assert.equal(admin.last('stats').tracked, 1, 'dropped after idling one full round');
 	});
 });
 
