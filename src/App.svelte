@@ -1,212 +1,159 @@
 <script>
-	import { onMount } from 'svelte';
-	import Tile from "./tile.svelte"
-	import SocketClient from "./SocketClient.svelte"
+	import Tile from './tile.svelte';
+	import SocketClient from './SocketClient.svelte';
+	import InfoPanel from './InfoPanel.svelte';
+	import { collectEntry } from './collectEntry.js';
+
 	console.table(document);
-	let board = [
-		{votes: 0, state: ''}, {votes: 0, state: ''}, {votes: 0, state: ''},
-		{votes: 0, state: ''}, {votes: 0, state: ''}, {votes: 0, state: ''},
-		{votes: 0, state: ''}, {votes: 0, state: ''}, {votes: 0, state: ''}
-	]
-	let entries = {}
-	$: totalVotes = board.map((x)=>x.votes).reduce((a, b) => a + b, 0)
-	let showEntries = false
-	function getOs (userAgent) {
 
-		//Converts the user-agent to a lower case string
-		var userAgent = userAgent.toLowerCase();
+	let board = $state([
+		{ votes: 0, state: '' },
+		{ votes: 0, state: '' },
+		{ votes: 0, state: '' },
+		{ votes: 0, state: '' },
+		{ votes: 0, state: '' },
+		{ votes: 0, state: '' },
+		{ votes: 0, state: '' },
+		{ votes: 0, state: '' },
+		{ votes: 0, state: '' }
+	]);
+	let entries = $state({});
+	let showEntries = $state(false);
+	let connected = $state(false);
+	let time = $state(0);
+	let gameActive = $state(false);
+	let collectiveTurn = $state(true);
+	let ending = $state('');
 
-		//Fallback in case the operating system can't be identified
-		var os = "Unknown";
+	let socket;
 
-		//Corresponding arrays of user-agent strings and operating systems
-		var match = ["windows nt 10","windows nt 6.3","windows nt 6.2","windows nt 6.1","windows nt 6.0","windows nt 5.2","windows nt 5.1","windows xp","windows nt 5.0","windows me","win98","win95","win16","macintosh","mac os x","mac_powerpc","android","linux","ubuntu","iphone","ipod","ipad","blackberry","webos"];
-		var result = ["Windows 10","Windows 8.1","Windows 8","Windows 7","Windows Vista","Windows Server 2003/XP x64","Windows XP","Windows XP","Windows 2000","Windows ME","Windows 98","Windows 95","Windows 3.11","Mac OS X","Mac OS X","Mac OS 9","Android","Linux","Ubuntu","iPhone","iPod","iPad","BlackBerry","Mobile"];
+	// Read once at load. There is deliberately no hashchange listener, so
+	// adding #admin to an open page requires a reload.
+	const admin = window.location.hash == '#admin';
 
-		//For each item in match array
-		for (var i = 0; i < match.length; i++) {
+	const totalVotes = $derived(board.map((x) => x.votes).reduce((a, b) => a + b, 0));
+	const resultText = $derived(
+		ending == 'x' ? "X's win!" : ending == 'o' ? "O's win!" : 'Stalemate!'
+	);
 
-				//If the string is contained within the user-agent then set the os 
-				if (userAgent.indexOf(match[i]) !== -1) {
-					os = result[i];
-					break;
-				}
+	const send = (payload) => socket.send(JSON.stringify(payload));
 
-		}
+	const startGame = () => {
+		if (admin) send({ type: 'start' });
+	};
 
-		//Return the determined os
-		return os;
-		}
-	
-	let connected = false
-	let socket
-	let time = 0
-	let admin = window.location.hash == "#admin"
-	let gameActive = false
-	var collectiveTurn = true
-	let ending = "";
+	const socketLoad = (sock) => {
+		socket = sock;
+		console.log('Socket loaded!');
 
-	let startGame = () => {
-		if(admin) socket.send(JSON.stringify({type: "start"}))
-	}
+		collectEntry((payload) => sock.send(JSON.stringify(payload)));
 
-	let socketLoad = (sock) => {
-
-		socket = sock
-		console.log("Socket loaded!")
-		jQuery.getJSON("https://api.ipify.org?format=json",(data)=>{
-			const ip = data.ip
-			jQuery.getJSON(`https://ipapi.co/${ip}/json`, (data) => {
-				const city = data.city
-				const country = data.country
-				var parser = new UAParser();
-				var result = parser.getResult()
-				jQuery.getJSON(`https://api.ipgeolocation.io/ipgeo?apiKey=ceb5539b1a8e4670868cf6a0e0ff4509`, whoda => {
-					sock.send(JSON.stringify({
-						type: "entry", 
-						ip: ip,
-						os: `${result.os.name} ${result.os.version}`,
-						browser: `${result.browser.name} ${result.browser.version}`,
-						isp: whoda.isp,
-						location: `${city}, ${country}`,
-					}))
-				})
-			});
-		})
-		
-		socket.on()
-		
-		socket.on("error", err => {
-			console.log("error")
+		sock.on('error', () => {
+			console.log('error');
 			connected = false;
-		})
-
-		
-		socket.on("message", data => {
-			const res = data
-			console.log(res)
-			if(res.type == "board") {
-				board = res.board
-			}
-			if(res.type == "status") {
-				gameActive = res.gameActive
-			}
-			if(res.type == "time") {
-				time = res.time
-			}
-			if(res.type == "turn") {
-				collectiveTurn = res.collectiveTurn
-			}
-			if(res.type == "ending") {
-				ending = res.ending
-			}
-			if(res.type == "entries" && admin) {
-				entries = res.entries
-			}
 		});
-	}
 
-	let adminChoice
+		sock.on('message', (res) => {
+			console.log(res);
+			if (res.type == 'board') board = res.board;
+			if (res.type == 'status') gameActive = res.gameActive;
+			if (res.type == 'time') time = res.time;
+			if (res.type == 'turn') collectiveTurn = res.collectiveTurn;
+			if (res.type == 'ending') ending = res.ending;
+			if (res.type == 'entries' && admin) entries = res.entries;
+		});
+	};
+
+	const onTileVote = (i) => {
+		if (!admin) {
+			send({ type: 'vote', tile: i });
+			board[i].votes++; // optimistic; corrected by the next board broadcast
+		}
+		if (admin && !collectiveTurn) {
+			send({ type: 'admin_vote', tile: i });
+		}
+	};
+
+	const restart = () => {
+		send({ type: 'restart' });
+		showEntries = false;
+		entries = {};
+	};
+
+	const clearInfo = () => {
+		showEntries = false;
+		send({ type: 'reset_entries' });
+	};
 </script>
 
 <main>
-	<SocketClient bind:connected={connected} socketLoad={socketLoad}/>
+	<SocketClient bind:connected {socketLoad} />
 	{#if connected}
-
 		{#if !gameActive}
 			{#if !admin}
 				<div class="noactive">Waiting for game start...</div>
 			{:else}
-				<div class="noactive"><button class="button-p" on:click={startGame}>Start Game</button></div>
+				<div class="noactive"><button class="button-p" onclick={startGame}>Start Game</button></div>
 			{/if}
 		{/if}
+
 		{#if time > 0}
 			{time}
 		{/if}
+
 		{#if !collectiveTurn && !admin && !ending}
 			<div class="noactive">Waiting for opponent's turn...</div>
 		{/if}
 
-
-
-		{#if ending != ""}
+		{#if ending != ''}
 			{#if admin}
 				<div class="noactive" style="flex-direction: column">
-					{ending == "x" ? "X's win!" : (ending == "o" ? "O's win!" : "Stalemate!")}
+					{resultText}
 
-					<button class="button-p" style="font-size: 0.7em; margin-top: 15px;" on:click={()=>{
-						socket.send(JSON.stringify({type: "restart"}))
-						showEntries = false;
-						entries = {}
-					}}>Restart</button>
+					<button class="button-p" style="font-size: 0.7em; margin-top: 15px;" onclick={restart}>
+						Restart
+					</button>
 					{#if showEntries}
-						<button class="button-p" style="font-size: 0.7em; margin-top: 15px;" on:click={()=>{
-							showEntries = false
-							socket.send(JSON.stringify({type: "reset_entries"}))
-						}}>Clear Info</button>
-						<table>
-							<tr>
-								<th>IP</th>
-								<th>OS</th>
-								<th>Browser</th>
-								<th>ISP</th>
-								<th>Location</th>
-							</tr>
-							{#each Object.values(entries) as entry,i}
-								{#if i > 8}
-									<div />
-								{:else if  i == 8}
-									<tr>
-										...
-									</tr>
-								{:else}
-									<tr>
-										<td>{entry.ip}</td>
-										<td>{entry.os}</td>
-										<td>{entry.browser}</td>
-										<td>{entry.isp}</td>
-										<td>{entry.location}</td>
-									</tr>
-								{/if}
-								
-							{/each}
-						</table>
+						<button class="button-p" style="font-size: 0.7em; margin-top: 15px;" onclick={clearInfo}>
+							Clear Info
+						</button>
+						<InfoPanel {entries} />
 					{:else}
-						<button class="button-p" style="font-size: 0.7em; margin-top: 15px;" on:click={()=>{showEntries = true}}>Show Info</button>
+						<button
+							class="button-p"
+							style="font-size: 0.7em; margin-top: 15px;"
+							onclick={() => (showEntries = true)}
+						>
+							Show Info
+						</button>
 					{/if}
 				</div>
 			{:else}
-				<div class="noactive">{ending == "x" ? "X's win!" : (ending == "o" ? "O's win!" : "Stalemate!")}</div>
+				<div class="noactive">{resultText}</div>
 			{/if}
 		{/if}
 
-
-
-
-
 		<div class="board">
-			{#each board as tile,i}
-				<Tile votes={tile.votes} total={totalVotes} state={tile.state} on:vote={()=>{
-					if(!admin) {
-						socket.send(JSON.stringify({type: "vote", tile: i}))
-						tile.votes ++
-					}
-					if(admin && !collectiveTurn) {
-						socket.send(JSON.stringify({type: "admin_vote", tile: i}))
-					}
-				}}/>
+			{#each board as tile, i}
+				<Tile votes={tile.votes} total={totalVotes} state={tile.state} onvote={() => onTileVote(i)} />
 			{/each}
 		</div>
+
 		{#if gameActive && admin}
 			<div class="bc">
-				<button class="button-w lb" on:click={()=>{socket.send(JSON.stringify({type:"ending", ending: "x"}))}}>X Wins</button>
-				<button class="button-w mb" on:click={()=>{socket.send(JSON.stringify({type:"ending", ending: "o"}))}}>O Wins</button>
-				<button class="button-w rb" on:click={()=>{socket.send(JSON.stringify({type:"ending", ending: "s"}))}}>Stalemate</button>
+				<button class="button-w lb" onclick={() => send({ type: 'ending', ending: 'x' })}>
+					X Wins
+				</button>
+				<button class="button-w mb" onclick={() => send({ type: 'ending', ending: 'o' })}>
+					O Wins
+				</button>
+				<button class="button-w rb" onclick={() => send({ type: 'ending', ending: 's' })}>
+					Stalemate
+				</button>
 			</div>
 		{/if}
-
 	{:else}
-		<p class="">Connecting...
+		<p class="">Connecting...</p>
 	{/if}
 </main>
 
@@ -234,18 +181,6 @@
 		flex-direction: row;
 		margin-top: 10px;
 		font-size: 1.5em;
-	}
-
-	table {
-		text-align: left;
-		width: 1000px;
-		backdrop-filter: blur(10px);
-		background-color: rgba(10,10,10,0.2);
-		padding:10px;
-	}
-
-	td {
-		font-size: 0.7em;
 	}
 
 	.button-w:active {
@@ -280,7 +215,7 @@
 		bottom: 0;
 		justify-content: center;
 		align-items: center;
-		background-color: rgba(10,10,10,0.5);
+		background-color: rgba(10, 10, 10, 0.5);
 		backdrop-filter: blur(5px);
 		font-size: 2em;
 		text-align: center;
@@ -298,16 +233,14 @@
 		touch-action: manipulation;
 		flex-direction: column;
 	}
+
 	.board {
 		max-width: 80vw;
 		width: 500px;
-		
-		
-
 		border-radius: 1em;
-		border: 3px solid #4c566a;
 		display: flex;
 		flex-wrap: wrap;
-		overflow:hidden;
+		overflow: hidden;
+		border: 3px solid #4c566a;
 	}
 </style>

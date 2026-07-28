@@ -1,8 +1,5 @@
+import { mount } from 'svelte';
 import App from './App.svelte';
 
-const app = new App({
-	target: document.body,
-	props: {}
-});
-
-export default app;
+// Svelte 5 replaces `new App({ target })` with mount().
+export default mount(App, { target: document.body });
