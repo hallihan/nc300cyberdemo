@@ -80,6 +80,9 @@ const resetActivePlayers = () => {
 const sendStats = () => broadcast({
     type: "stats",
     tracked: activeCount(),
+    // Everyone connected, engaged or not — distinct from activeCount(), which
+    // prunes idlers. This is the honest "players online" figure.
+    online: clients.filter(isPlayer).length,
     voted: votedThisRound.size,
     entries: Object.keys(entries).length
 })

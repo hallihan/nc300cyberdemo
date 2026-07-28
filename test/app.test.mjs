@@ -284,6 +284,34 @@ describe('admin view (#admin)', () => {
 		}
 	});
 
+	test('the start screen shows a live count of players online', async () => {
+		const { recv, text, $ } = await boot({ hash: '#admin' });
+		await recv({ type: 'stats', tracked: 0, online: 0, voted: 0, entries: 0 });
+		assert.match(text(), /0 players online/);
+
+		await recv({ type: 'stats', tracked: 1, online: 1, voted: 0, entries: 0 });
+		assert.match(text(), /1 player online/, 'singular');
+
+		await recv({ type: 'stats', tracked: 7, online: 7, voted: 0, entries: 0 });
+		assert.match(text(), /7 players online/);
+		assert.equal($('.online-count').length, 1);
+	});
+
+	test('the online count reflects connections, not just engaged players', async () => {
+		// a player pruned for idling is still online; the start screen must say so
+		const { recv, text } = await boot({ hash: '#admin' });
+		await recv({ type: 'stats', tracked: 2, online: 9, voted: 0, entries: 0 });
+		assert.match(text(), /9 players online/);
+	});
+
+	test('the count disappears once the game starts', async () => {
+		const { recv, text } = await boot({ hash: '#admin' });
+		await recv({ type: 'stats', tracked: 5, online: 5, voted: 0, entries: 0 });
+		assert.match(text(), /5 players online/);
+		await recv({ type: 'status', gameActive: true });
+		assert.doesNotMatch(text(), /players online/, 'start screen is gone');
+	});
+
 	test('players are never offered the difficulty choice', async () => {
 		const { text } = await boot();
 		assert.match(text(), /Waiting for game start/);
@@ -349,6 +377,47 @@ describe('admin view (#admin)', () => {
 		await recv({ type: 'board', board });
 		await new Promise((r) => setTimeout(r, 1100)); // outlast the cooldown
 		assert.equal($('button.tile')[6].disabled, true, 'played tile must remain disabled');
+	});
+
+	test('the result screen offers all three difficulties for the next game', async () => {
+		const { recv, text, $, button, flush, sent } = await boot({ hash: '#admin' });
+		await recv({ type: 'ending', ending: 'x' });
+
+		const t = text();
+		assert.match(t, /X's win!/);
+		assert.match(t, /Next game/);
+		assert.equal($('.next-game .start-buttons button').length, 3);
+
+		for (const [label, level] of [
+			['Start Easy', 'easy'],
+			['Start Medium', 'medium'],
+			['Start Difficult', 'hard']
+		]) {
+			button(label).click();
+			await flush();
+			assert.deepEqual(sent.at(-1), { type: 'start', difficulty: level });
+		}
+	});
+
+	test('starting the next game closes the device panel', async () => {
+		const { recv, button, flush, text, $ } = await boot({ hash: '#admin' });
+		await recv({ type: 'ending', ending: 'x' });
+		await recv({ type: 'entries', entries: { a: { ip: 'a', browser: 'Chrome', battery: '5%' } } });
+		button('Show Info').click();
+		await flush();
+		assert.equal($('.info-table').length, 1, 'panel open');
+
+		button('Start Medium').click();
+		await flush();
+		assert.equal($('.info-table').length, 0, 'panel closed for the new game');
+		assert.match(text(), /Show Info/);
+	});
+
+	test('players do not get difficulty buttons on the result screen', async () => {
+		const { recv, text } = await boot();
+		await recv({ type: 'ending', ending: 'o' });
+		assert.match(text(), /O's win!/);
+		assert.doesNotMatch(text(), /Next game|Start Easy|Start Medium|Start Difficult/);
 	});
 
 	test('Restart sends restart and clears the panel', async () => {

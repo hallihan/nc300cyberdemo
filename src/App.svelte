@@ -27,6 +27,7 @@
 
 	// Round/tracking stats, pushed by the server.
 	let tracked = $state(0);
+	let online = $state(0);
 	let voted = $state(0);
 	let thinking = $state(false);
 
@@ -45,7 +46,9 @@
 	const send = (payload) => socket.send(JSON.stringify(payload));
 
 	const startGame = (level) => {
-		if (admin) send({ type: 'start', difficulty: level });
+		if (!admin) return;
+		showEntries = false; // close the device panel when a new game begins
+		send({ type: 'start', difficulty: level });
 	};
 
 	const socketLoad = (sock) => {
@@ -73,6 +76,7 @@
 			if (res.type == 'entries' && admin) entries = res.entries;
 			if (res.type == 'stats') {
 				tracked = res.tracked;
+				online = res.online;
 				voted = res.voted;
 			}
 			if (res.type == 'thinking') thinking = res.thinking;
@@ -106,9 +110,15 @@
 				<div class="noactive">Waiting for game start...</div>
 			{:else}
 				<div class="noactive start-menu">
-					<button class="button-p" onclick={() => startGame('easy')}>Start Easy</button>
-					<button class="button-p" onclick={() => startGame('medium')}>Start Medium</button>
-					<button class="button-p" onclick={() => startGame('hard')}>Start Difficult</button>
+					<div class="online-count">
+						<strong>{online}</strong>
+						{online === 1 ? 'player' : 'players'} online
+					</div>
+					<div class="start-buttons">
+						<button class="button-p" onclick={() => startGame('easy')}>Start Easy</button>
+						<button class="button-p" onclick={() => startGame('medium')}>Start Medium</button>
+						<button class="button-p" onclick={() => startGame('hard')}>Start Difficult</button>
+					</div>
 				</div>
 			{/if}
 		{/if}
@@ -121,6 +131,16 @@
 			{#if admin}
 				<div class="noactive" style="flex-direction: column">
 					{resultText}
+
+					<!-- Straight into the next game, without going via Restart. -->
+					<div class="next-game">
+						<div class="next-label">Next game</div>
+						<div class="start-buttons">
+							<button class="button-p" onclick={() => startGame('easy')}>Start Easy</button>
+							<button class="button-p" onclick={() => startGame('medium')}>Start Medium</button>
+							<button class="button-p" onclick={() => startGame('hard')}>Start Difficult</button>
+						</div>
+					</div>
 
 					<button class="button-p" style="font-size: 0.7em; margin-top: 15px;" onclick={restart}>
 						Restart
@@ -294,10 +314,48 @@
 		opacity: 1;
 	}
 
+	/* 3x the previous 0.6em. .noactive is 2em, so buttons land around 3.6em —
+	   sized to read from the back of a room off a projector. */
 	.start-menu {
-		gap: 0.4em;
+		flex-direction: column;
+		gap: 0.5em;
+		font-size: 1.8em;
+	}
+
+	.start-buttons {
+		display: flex;
 		flex-wrap: wrap;
+		justify-content: center;
+		gap: 0.3em;
+	}
+
+	/* On the result overlay, matched to the other buttons there rather than to
+	   the oversized start screen. */
+	.next-game {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.4em;
+		margin-top: 15px;
+		font-size: 0.7em;
+	}
+
+	.next-label {
 		font-size: 0.6em;
+		color: #d8dee9;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+	}
+
+	.online-count {
+		font-size: 0.55em;
+		color: #d8dee9;
+		letter-spacing: 0.02em;
+	}
+
+	.online-count strong {
+		color: #00ff95;
+		font-variant-numeric: tabular-nums;
 	}
 
 	/* Identical on the projected admin screen and on every phone. */
