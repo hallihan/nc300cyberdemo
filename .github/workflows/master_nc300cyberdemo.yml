@@ -28,7 +28,12 @@ jobs:
           npm run test --if-present
 
       - name: 'Tar files'
-        run: tar --exclude='./node-app.tar' --exclude='./.git' -czf node-app.tar .
+        # Build the archive outside the tree being archived, then move it in.
+        # Writing it into '.' mutates the directory while tar is reading it,
+        # which GNU tar reports as "file changed as we read it" and exits 1.
+        run: |
+          tar --exclude='./.git' -czf "$RUNNER_TEMP/node-app.tar" .
+          mv "$RUNNER_TEMP/node-app.tar" node-app.tar
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
