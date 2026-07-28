@@ -1,4 +1,16 @@
 (function() {
+	//#region \0rolldown/runtime.js
+	var __defProp = Object.defineProperty;
+	var __exportAll = (all, no_symbols) => {
+		let target = {};
+		for (var name in all) __defProp(target, name, {
+			get: all[name],
+			enumerable: true
+		});
+		if (!no_symbols) __defProp(target, Symbol.toStringTag, { value: "Module" });
+		return target;
+	};
+	//#endregion
 	//#region node_modules/svelte/src/internal/shared/utils.js
 	var is_array = Array.isArray;
 	var index_of = Array.prototype.indexOf;
@@ -47,7 +59,6 @@
 	* This is on a block effect 99% of the time but may also be on a branch effect if its parent block effect was pruned
 	*/
 	var EFFECT_TRANSPARENT = 65536;
-	var HEAD_EFFECT = 1 << 18;
 	var EFFECT_PRESERVED = 1 << 19;
 	var USER_EFFECT = 1 << 20;
 	var EFFECT_OFFSCREEN = 1 << 25;
@@ -72,7 +83,7 @@
 		name = "StaleReactionError";
 		message = "The reaction that called `getAbortSignal()` was re-run or destroyed";
 	}();
-	var IS_XHTML = !!globalThis.document?.contentType && /* @__PURE__ */ globalThis.document.contentType.includes("xml");
+	globalThis.document?.contentType;
 	//#endregion
 	//#region node_modules/svelte/src/internal/client/errors.js
 	/**
@@ -91,6 +102,29 @@
 	*/
 	function each_key_duplicate(a, b, value) {
 		throw new Error(`https://svelte.dev/e/each_key_duplicate`);
+	}
+	/**
+	* `%rune%` cannot be used inside an effect cleanup function
+	* @param {string} rune
+	* @returns {never}
+	*/
+	function effect_in_teardown(rune) {
+		throw new Error(`https://svelte.dev/e/effect_in_teardown`);
+	}
+	/**
+	* Effect cannot be created inside a `$derived` value that was not itself created inside an effect
+	* @returns {never}
+	*/
+	function effect_in_unowned_derived() {
+		throw new Error(`https://svelte.dev/e/effect_in_unowned_derived`);
+	}
+	/**
+	* `%rune%` can only be used inside an effect (e.g. during component initialisation)
+	* @param {string} rune
+	* @returns {never}
+	*/
+	function effect_orphan(rune) {
+		throw new Error(`https://svelte.dev/e/effect_orphan`);
 	}
 	/**
 	* Maximum update depth exceeded. This typically indicates that an effect reads and writes the same piece of state
@@ -2369,6 +2403,16 @@
 	//#region node_modules/svelte/src/internal/client/reactivity/effects.js
 	/** @import { Blocker, ComponentContext, ComponentContextLegacy, Derived, Effect, TemplateNode, TransitionManager } from '#client' */
 	/**
+	* @param {'$effect' | '$effect.pre' | '$inspect'} rune
+	*/
+	function validate_effect(rune) {
+		if (active_effect === null) {
+			if (active_reaction === null) effect_orphan(rune);
+			effect_in_unowned_derived();
+		}
+		if (is_destroying_effect) effect_in_teardown(rune);
+	}
+	/**
 	* @param {Effect} effect
 	* @param {Effect} parent_effect
 	*/
@@ -2448,6 +2492,18 @@
 		set_signal_status(effect, CLEAN);
 		effect.teardown = fn;
 		return effect;
+	}
+	/**
+	* Internal representation of `$effect(...)`
+	* @param {() => void | (() => void)} fn
+	*/
+	function user_effect(fn) {
+		validate_effect("$effect");
+		var flags = active_effect.f;
+		if (!active_reaction && (flags & 32) !== 0 && component_context !== null && !component_context.i) {
+			var context = component_context;
+			(context.e ??= []).push(fn);
+		} else return create_user_effect(fn);
 	}
 	/**
 	* @param {() => void | (() => void)} fn
@@ -3094,63 +3150,6 @@
 	/** @type {Set<(events: Array<string>) => void>} */
 	var root_event_handles = /* @__PURE__ */ new Set();
 	/**
-	* SSR adds onload and onerror attributes to catch those events before the hydration.
-	* This function detects those cases, removes the attributes and replays the events.
-	* @param {HTMLElement} dom
-	*/
-	function replay_events(dom) {
-		if (!hydrating) return;
-		dom.removeAttribute("onload");
-		dom.removeAttribute("onerror");
-		const event = dom.__e;
-		if (event !== void 0) {
-			dom.__e = void 0;
-			queueMicrotask(() => {
-				if (dom.isConnected) dom.dispatchEvent(event);
-			});
-		}
-	}
-	/**
-	* @param {string} event_name
-	* @param {EventTarget} dom
-	* @param {EventListener} [handler]
-	* @param {AddEventListenerOptions} [options]
-	*/
-	function create_event(event_name, dom, handler, options = {}) {
-		/**
-		* @this {EventTarget}
-		*/
-		function target_handler(event) {
-			if (!options.capture) handle_event_propagation.call(dom, event);
-			if (!event.cancelBubble) return without_reactive_context(() => {
-				return handler?.call(this, event);
-			});
-		}
-		if (event_name.startsWith("pointer") || event_name.startsWith("touch") || event_name === "wheel") queue_micro_task(() => {
-			dom.addEventListener(event_name, target_handler, options);
-		});
-		else dom.addEventListener(event_name, target_handler, options);
-		return target_handler;
-	}
-	/**
-	* @param {string} event_name
-	* @param {Element} dom
-	* @param {EventListener} [handler]
-	* @param {boolean} [capture]
-	* @param {boolean} [passive]
-	* @returns {void}
-	*/
-	function event(event_name, dom, handler, capture, passive) {
-		var options = {
-			capture,
-			passive
-		};
-		var target_handler = create_event(event_name, dom, handler, options);
-		if (dom === document.body || dom === window || dom === document || dom instanceof HTMLMediaElement) teardown(() => {
-			dom.removeEventListener(event_name, target_handler, options);
-		});
-	}
-	/**
 	* @param {string} event_name
 	* @param {Element} element
 	* @param {EventListener} [handler]
@@ -3262,7 +3261,6 @@ createHTML: (html) => {
 	//#region node_modules/svelte/src/internal/client/dom/template.js
 	/** @import { Effect, EffectNodes, TemplateNode } from '#client' */
 	/** @import { TemplateStructure } from './types' */
-	var SCRIPT_TAG = IS_XHTML ? "script" : "SCRIPT";
 	/**
 	* @param {TemplateNode} start
 	* @param {TemplateNode | null} end
@@ -3309,33 +3307,6 @@ createHTML: (html) => {
 			} else assign_nodes(clone, clone);
 			return clone;
 		};
-	}
-	/**
-	* @param {() => Element | DocumentFragment} fn
-	*/
-	function with_script(fn) {
-		return () => run_scripts(fn());
-	}
-	/**
-	* Creating a document fragment from HTML that contains script tags will not execute
-	* the scripts. We need to replace the script tags with new ones so that they are executed.
-	* @param {Element | DocumentFragment} node
-	* @returns {Node | Node[]}
-	*/
-	function run_scripts(node) {
-		if (hydrating) return node;
-		const is_fragment = node.nodeType === 11;
-		const scripts = node.nodeName === SCRIPT_TAG ? [node] : node.querySelectorAll("script");
-		const effect = active_effect;
-		for (const script of scripts) {
-			const clone = create_element("script");
-			for (var attribute of script.attributes) clone.setAttribute(attribute.name, attribute.value);
-			clone.textContent = script.textContent;
-			if (is_fragment ? node.firstChild === script : node === script) effect.nodes.start = clone;
-			if (is_fragment ? node.lastChild === script : node === script) effect.nodes.end = clone;
-			script.replaceWith(clone);
-		}
-		return node;
 	}
 	/**
 	* Don't mark this as side-effect-free, hydration needs to walk all nodes
@@ -4094,43 +4065,6 @@ createHTML: (html) => {
 		else next.prev = prev;
 	}
 	//#endregion
-	//#region node_modules/svelte/src/internal/client/dom/blocks/svelte-head.js
-	/** @import { TemplateNode } from '#client' */
-	/**
-	* @param {string} hash
-	* @param {(anchor: Node) => void} render_fn
-	* @returns {void}
-	*/
-	function head(hash, render_fn) {
-		let previous_hydrate_node = null;
-		let was_hydrating = hydrating;
-		/** @type {Comment | Text} */
-		var anchor;
-		if (hydrating) {
-			previous_hydrate_node = hydrate_node;
-			var head_anchor = /* @__PURE__ */ get_first_child(document.head);
-			while (head_anchor !== null && (head_anchor.nodeType !== 8 || head_anchor.data !== hash)) head_anchor = /* @__PURE__ */ get_next_sibling(head_anchor);
-			if (head_anchor === null) set_hydrating(false);
-			else {
-				var start = /* @__PURE__ */ get_next_sibling(head_anchor);
-				head_anchor.remove();
-				set_hydrate_node(start);
-			}
-		}
-		if (!hydrating) anchor = document.head.appendChild(create_text());
-		try {
-			block(() => {
-				var e = branch(() => render_fn(anchor));
-				e.f |= HEAD_EFFECT;
-			});
-		} finally {
-			if (was_hydrating) {
-				set_hydrating(true);
-				set_hydrate_node(previous_hydrate_node);
-			}
-		}
-	}
-	//#endregion
 	//#region node_modules/svelte/src/internal/shared/attributes.js
 	var whitespace = [..." 	\n\r\f\xA0\v﻿"];
 	/**
@@ -4398,7 +4332,7 @@ createHTML: (html) => {
 	if (typeof window !== "undefined") ((window.__svelte ??= {}).v ??= /* @__PURE__ */ new Set()).add("5");
 	//#endregion
 	//#region src/tile.svelte
-	var root$3 = /* @__PURE__ */ from_html(`<span class="material-icons-round icon x svelte-avvm3f">close</span>`);
+	var root$2 = /* @__PURE__ */ from_html(`<span class="material-icons-round icon x svelte-avvm3f">close</span>`);
 	var root_1$2 = /* @__PURE__ */ from_html(`<span class="material-icons-outlined icon o svelte-avvm3f">circle</span>`);
 	var root_2$2 = /* @__PURE__ */ from_html(`<p> </p>`);
 	var root_3$2 = /* @__PURE__ */ from_html(`<button class="tile svelte-avvm3f"><div class="con svelte-avvm3f"><!></div></button>`);
@@ -4421,7 +4355,7 @@ createHTML: (html) => {
 			var fragment = comment();
 			var node_1 = first_child(fragment);
 			var consequent = ($$anchor) => {
-				append($$anchor, root$3());
+				append($$anchor, root$2());
 			};
 			var alternate = ($$anchor) => {
 				append($$anchor, root_1$2());
@@ -4458,31 +4392,3307 @@ createHTML: (html) => {
 	}
 	delegate(["click"]);
 	//#endregion
+	//#region node_modules/engine.io-parser/build/esm/commons.js
+	var PACKET_TYPES = Object.create(null);
+	PACKET_TYPES["open"] = "0";
+	PACKET_TYPES["close"] = "1";
+	PACKET_TYPES["ping"] = "2";
+	PACKET_TYPES["pong"] = "3";
+	PACKET_TYPES["message"] = "4";
+	PACKET_TYPES["upgrade"] = "5";
+	PACKET_TYPES["noop"] = "6";
+	var PACKET_TYPES_REVERSE = Object.create(null);
+	Object.keys(PACKET_TYPES).forEach((key) => {
+		PACKET_TYPES_REVERSE[PACKET_TYPES[key]] = key;
+	});
+	var ERROR_PACKET = {
+		type: "error",
+		data: "parser error"
+	};
+	//#endregion
+	//#region node_modules/engine.io-parser/build/esm/encodePacket.browser.js
+	var withNativeBlob$1 = typeof Blob === "function" || typeof Blob !== "undefined" && Object.prototype.toString.call(Blob) === "[object BlobConstructor]";
+	var withNativeArrayBuffer$2 = typeof ArrayBuffer === "function";
+	var isView$1 = (obj) => {
+		return typeof ArrayBuffer.isView === "function" ? ArrayBuffer.isView(obj) : obj && obj.buffer instanceof ArrayBuffer;
+	};
+	var encodePacket = ({ type, data }, supportsBinary, callback) => {
+		if (withNativeBlob$1 && data instanceof Blob) if (supportsBinary) return callback(data);
+		else return encodeBlobAsBase64(data, callback);
+		else if (withNativeArrayBuffer$2 && (data instanceof ArrayBuffer || isView$1(data))) if (supportsBinary) return callback(data);
+		else return encodeBlobAsBase64(new Blob([data]), callback);
+		return callback(PACKET_TYPES[type] + (data || ""));
+	};
+	var encodeBlobAsBase64 = (data, callback) => {
+		const fileReader = new FileReader();
+		fileReader.onload = function() {
+			const content = fileReader.result.split(",")[1];
+			callback("b" + (content || ""));
+		};
+		return fileReader.readAsDataURL(data);
+	};
+	function toArray(data) {
+		if (data instanceof Uint8Array) return data;
+		else if (data instanceof ArrayBuffer) return new Uint8Array(data);
+		else return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+	}
+	var TEXT_ENCODER;
+	function encodePacketToBinary(packet, callback) {
+		if (withNativeBlob$1 && packet.data instanceof Blob) return packet.data.arrayBuffer().then(toArray).then(callback);
+		else if (withNativeArrayBuffer$2 && (packet.data instanceof ArrayBuffer || isView$1(packet.data))) return callback(toArray(packet.data));
+		encodePacket(packet, false, (encoded) => {
+			if (!TEXT_ENCODER) TEXT_ENCODER = new TextEncoder();
+			callback(TEXT_ENCODER.encode(encoded));
+		});
+	}
+	//#endregion
+	//#region node_modules/engine.io-parser/build/esm/contrib/base64-arraybuffer.js
+	var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	var lookup$1 = typeof Uint8Array === "undefined" ? [] : /* @__PURE__ */ new Uint8Array(256);
+	for (let i = 0; i < 64; i++) lookup$1[chars.charCodeAt(i)] = i;
+	var decode$1 = (base64) => {
+		let bufferLength = base64.length * .75, len = base64.length, i, p = 0, encoded1, encoded2, encoded3, encoded4;
+		if (base64[base64.length - 1] === "=") {
+			bufferLength--;
+			if (base64[base64.length - 2] === "=") bufferLength--;
+		}
+		const arraybuffer = new ArrayBuffer(bufferLength), bytes = new Uint8Array(arraybuffer);
+		for (i = 0; i < len; i += 4) {
+			encoded1 = lookup$1[base64.charCodeAt(i)];
+			encoded2 = lookup$1[base64.charCodeAt(i + 1)];
+			encoded3 = lookup$1[base64.charCodeAt(i + 2)];
+			encoded4 = lookup$1[base64.charCodeAt(i + 3)];
+			bytes[p++] = encoded1 << 2 | encoded2 >> 4;
+			bytes[p++] = (encoded2 & 15) << 4 | encoded3 >> 2;
+			bytes[p++] = (encoded3 & 3) << 6 | encoded4 & 63;
+		}
+		return arraybuffer;
+	};
+	//#endregion
+	//#region node_modules/engine.io-parser/build/esm/decodePacket.browser.js
+	var withNativeArrayBuffer$1 = typeof ArrayBuffer === "function";
+	var decodePacket = (encodedPacket, binaryType) => {
+		if (typeof encodedPacket !== "string") return {
+			type: "message",
+			data: mapBinary(encodedPacket, binaryType)
+		};
+		const type = encodedPacket.charAt(0);
+		if (type === "b") return {
+			type: "message",
+			data: decodeBase64Packet(encodedPacket.substring(1), binaryType)
+		};
+		if (!PACKET_TYPES_REVERSE[type]) return ERROR_PACKET;
+		return encodedPacket.length > 1 ? {
+			type: PACKET_TYPES_REVERSE[type],
+			data: encodedPacket.substring(1)
+		} : { type: PACKET_TYPES_REVERSE[type] };
+	};
+	var decodeBase64Packet = (data, binaryType) => {
+		if (withNativeArrayBuffer$1) return mapBinary(decode$1(data), binaryType);
+		else return {
+			base64: true,
+			data
+		};
+	};
+	var mapBinary = (data, binaryType) => {
+		switch (binaryType) {
+			case "blob": if (data instanceof Blob) return data;
+			else return new Blob([data]);
+			default: if (data instanceof ArrayBuffer) return data;
+			else return data.buffer;
+		}
+	};
+	//#endregion
+	//#region node_modules/engine.io-parser/build/esm/index.js
+	var SEPARATOR = String.fromCharCode(30);
+	var encodePayload = (packets, callback) => {
+		const length = packets.length;
+		const encodedPackets = new Array(length);
+		let count = 0;
+		packets.forEach((packet, i) => {
+			encodePacket(packet, false, (encodedPacket) => {
+				encodedPackets[i] = encodedPacket;
+				if (++count === length) callback(encodedPackets.join(SEPARATOR));
+			});
+		});
+	};
+	var decodePayload = (encodedPayload, binaryType) => {
+		const encodedPackets = encodedPayload.split(SEPARATOR);
+		const packets = [];
+		for (let i = 0; i < encodedPackets.length; i++) {
+			const decodedPacket = decodePacket(encodedPackets[i], binaryType);
+			packets.push(decodedPacket);
+			if (decodedPacket.type === "error") break;
+		}
+		return packets;
+	};
+	function createPacketEncoderStream() {
+		return new TransformStream({ transform(packet, controller) {
+			encodePacketToBinary(packet, (encodedPacket) => {
+				const payloadLength = encodedPacket.length;
+				let header;
+				if (payloadLength < 126) {
+					header = /* @__PURE__ */ new Uint8Array(1);
+					new DataView(header.buffer).setUint8(0, payloadLength);
+				} else if (payloadLength < 65536) {
+					header = /* @__PURE__ */ new Uint8Array(3);
+					const view = new DataView(header.buffer);
+					view.setUint8(0, 126);
+					view.setUint16(1, payloadLength);
+				} else {
+					header = /* @__PURE__ */ new Uint8Array(9);
+					const view = new DataView(header.buffer);
+					view.setUint8(0, 127);
+					view.setBigUint64(1, BigInt(payloadLength));
+				}
+				if (packet.data && typeof packet.data !== "string") header[0] |= 128;
+				controller.enqueue(header);
+				controller.enqueue(encodedPacket);
+			});
+		} });
+	}
+	var TEXT_DECODER;
+	function totalLength(chunks) {
+		return chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+	}
+	function concatChunks(chunks, size) {
+		if (chunks[0].length === size) return chunks.shift();
+		const buffer = new Uint8Array(size);
+		let j = 0;
+		for (let i = 0; i < size; i++) {
+			buffer[i] = chunks[0][j++];
+			if (j === chunks[0].length) {
+				chunks.shift();
+				j = 0;
+			}
+		}
+		if (chunks.length && j < chunks[0].length) chunks[0] = chunks[0].slice(j);
+		return buffer;
+	}
+	function createPacketDecoderStream(maxPayload, binaryType) {
+		if (!TEXT_DECODER) TEXT_DECODER = new TextDecoder();
+		const chunks = [];
+		let state = 0;
+		let expectedLength = -1;
+		let isBinary = false;
+		return new TransformStream({ transform(chunk, controller) {
+			chunks.push(chunk);
+			while (true) {
+				if (state === 0) {
+					if (totalLength(chunks) < 1) break;
+					const header = concatChunks(chunks, 1);
+					isBinary = (header[0] & 128) === 128;
+					expectedLength = header[0] & 127;
+					if (expectedLength < 126) state = 3;
+					else if (expectedLength === 126) state = 1;
+					else state = 2;
+				} else if (state === 1) {
+					if (totalLength(chunks) < 2) break;
+					const headerArray = concatChunks(chunks, 2);
+					expectedLength = new DataView(headerArray.buffer, headerArray.byteOffset, headerArray.length).getUint16(0);
+					state = 3;
+				} else if (state === 2) {
+					if (totalLength(chunks) < 8) break;
+					const headerArray = concatChunks(chunks, 8);
+					const view = new DataView(headerArray.buffer, headerArray.byteOffset, headerArray.length);
+					const n = view.getUint32(0);
+					if (n > Math.pow(2, 21) - 1) {
+						controller.enqueue(ERROR_PACKET);
+						break;
+					}
+					expectedLength = n * Math.pow(2, 32) + view.getUint32(4);
+					state = 3;
+				} else {
+					if (totalLength(chunks) < expectedLength) break;
+					const data = concatChunks(chunks, expectedLength);
+					controller.enqueue(decodePacket(isBinary ? data : TEXT_DECODER.decode(data), binaryType));
+					state = 0;
+				}
+				if (expectedLength === 0 || expectedLength > maxPayload) {
+					controller.enqueue(ERROR_PACKET);
+					break;
+				}
+			}
+		} });
+	}
+	//#endregion
+	//#region node_modules/@socket.io/component-emitter/lib/esm/index.js
+	/**
+	* Initialize a new `Emitter`.
+	*
+	* @api public
+	*/
+	function Emitter(obj) {
+		if (obj) return mixin(obj);
+	}
+	/**
+	* Mixin the emitter properties.
+	*
+	* @param {Object} obj
+	* @return {Object}
+	* @api private
+	*/
+	function mixin(obj) {
+		for (var key in Emitter.prototype) obj[key] = Emitter.prototype[key];
+		return obj;
+	}
+	/**
+	* Listen on the given `event` with `fn`.
+	*
+	* @param {String} event
+	* @param {Function} fn
+	* @return {Emitter}
+	* @api public
+	*/
+	Emitter.prototype.on = Emitter.prototype.addEventListener = function(event, fn) {
+		this._callbacks = this._callbacks || {};
+		(this._callbacks["$" + event] = this._callbacks["$" + event] || []).push(fn);
+		return this;
+	};
+	/**
+	* Adds an `event` listener that will be invoked a single
+	* time then automatically removed.
+	*
+	* @param {String} event
+	* @param {Function} fn
+	* @return {Emitter}
+	* @api public
+	*/
+	Emitter.prototype.once = function(event, fn) {
+		function on() {
+			this.off(event, on);
+			fn.apply(this, arguments);
+		}
+		on.fn = fn;
+		this.on(event, on);
+		return this;
+	};
+	/**
+	* Remove the given callback for `event` or all
+	* registered callbacks.
+	*
+	* @param {String} event
+	* @param {Function} fn
+	* @return {Emitter}
+	* @api public
+	*/
+	Emitter.prototype.off = Emitter.prototype.removeListener = Emitter.prototype.removeAllListeners = Emitter.prototype.removeEventListener = function(event, fn) {
+		this._callbacks = this._callbacks || {};
+		if (0 == arguments.length) {
+			this._callbacks = {};
+			return this;
+		}
+		var callbacks = this._callbacks["$" + event];
+		if (!callbacks) return this;
+		if (1 == arguments.length) {
+			delete this._callbacks["$" + event];
+			return this;
+		}
+		var cb;
+		for (var i = 0; i < callbacks.length; i++) {
+			cb = callbacks[i];
+			if (cb === fn || cb.fn === fn) {
+				callbacks.splice(i, 1);
+				break;
+			}
+		}
+		if (callbacks.length === 0) delete this._callbacks["$" + event];
+		return this;
+	};
+	/**
+	* Emit `event` with the given args.
+	*
+	* @param {String} event
+	* @param {Mixed} ...
+	* @return {Emitter}
+	*/
+	Emitter.prototype.emit = function(event) {
+		this._callbacks = this._callbacks || {};
+		var args = new Array(arguments.length - 1), callbacks = this._callbacks["$" + event];
+		for (var i = 1; i < arguments.length; i++) args[i - 1] = arguments[i];
+		if (callbacks) {
+			callbacks = callbacks.slice(0);
+			for (var i = 0, len = callbacks.length; i < len; ++i) callbacks[i].apply(this, args);
+		}
+		return this;
+	};
+	Emitter.prototype.emitReserved = Emitter.prototype.emit;
+	/**
+	* Return array of callbacks for `event`.
+	*
+	* @param {String} event
+	* @return {Array}
+	* @api public
+	*/
+	Emitter.prototype.listeners = function(event) {
+		this._callbacks = this._callbacks || {};
+		return this._callbacks["$" + event] || [];
+	};
+	/**
+	* Check if this emitter has `event` handlers.
+	*
+	* @param {String} event
+	* @return {Boolean}
+	* @api public
+	*/
+	Emitter.prototype.hasListeners = function(event) {
+		return !!this.listeners(event).length;
+	};
+	//#endregion
+	//#region node_modules/engine.io-client/build/esm/globals.js
+	var nextTick = (() => {
+		if (typeof Promise === "function" && typeof Promise.resolve === "function") return (cb) => Promise.resolve().then(cb);
+		else return (cb, setTimeoutFn) => setTimeoutFn(cb, 0);
+	})();
+	var globalThisShim = (() => {
+		if (typeof self !== "undefined") return self;
+		else if (typeof window !== "undefined") return window;
+		else return Function("return this")();
+	})();
+	var defaultBinaryType = "arraybuffer";
+	//#endregion
+	//#region node_modules/engine.io-client/build/esm/util.js
+	function pick(obj, ...attr) {
+		return attr.reduce((acc, k) => {
+			if (obj.hasOwnProperty(k)) acc[k] = obj[k];
+			return acc;
+		}, {});
+	}
+	var NATIVE_SET_TIMEOUT = globalThisShim.setTimeout;
+	var NATIVE_CLEAR_TIMEOUT = globalThisShim.clearTimeout;
+	function installTimerFunctions(obj, opts) {
+		if (opts.useNativeTimers) {
+			obj.setTimeoutFn = NATIVE_SET_TIMEOUT.bind(globalThisShim);
+			obj.clearTimeoutFn = NATIVE_CLEAR_TIMEOUT.bind(globalThisShim);
+		} else {
+			obj.setTimeoutFn = globalThisShim.setTimeout.bind(globalThisShim);
+			obj.clearTimeoutFn = globalThisShim.clearTimeout.bind(globalThisShim);
+		}
+	}
+	var BASE64_OVERHEAD = 1.33;
+	function byteLength(obj) {
+		if (typeof obj === "string") return utf8Length(obj);
+		return Math.ceil((obj.byteLength || obj.size) * BASE64_OVERHEAD);
+	}
+	function utf8Length(str) {
+		let c = 0, length = 0;
+		for (let i = 0, l = str.length; i < l; i++) {
+			c = str.charCodeAt(i);
+			if (c < 128) length += 1;
+			else if (c < 2048) length += 2;
+			else if (c < 55296 || c >= 57344) length += 3;
+			else {
+				i++;
+				length += 4;
+			}
+		}
+		return length;
+	}
+	/**
+	* Generates a random 8-characters string.
+	*/
+	function randomString() {
+		return Date.now().toString(36).substring(3) + Math.random().toString(36).substring(2, 5);
+	}
+	//#endregion
+	//#region node_modules/engine.io-client/build/esm/contrib/parseqs.js
+	/**
+	* Compiles a querystring
+	* Returns string representation of the object
+	*
+	* @param {Object}
+	* @api private
+	*/
+	function encode(obj) {
+		let str = "";
+		for (let i in obj) if (obj.hasOwnProperty(i)) {
+			if (str.length) str += "&";
+			str += encodeURIComponent(i) + "=" + encodeURIComponent(obj[i]);
+		}
+		return str;
+	}
+	/**
+	* Parses a simple querystring into an object
+	*
+	* @param {String} qs
+	* @api private
+	*/
+	function decode(qs) {
+		let qry = {};
+		let pairs = qs.split("&");
+		for (let i = 0, l = pairs.length; i < l; i++) {
+			let pair = pairs[i].split("=");
+			qry[decodeURIComponent(pair[0])] = decodeURIComponent(pair[1]);
+		}
+		return qry;
+	}
+	//#endregion
+	//#region node_modules/engine.io-client/build/esm/transport.js
+	var TransportError = class extends Error {
+		constructor(reason, description, context) {
+			super(reason);
+			this.description = description;
+			this.context = context;
+			this.type = "TransportError";
+		}
+	};
+	var Transport = class extends Emitter {
+		/**
+		* Transport abstract constructor.
+		*
+		* @param {Object} opts - options
+		* @protected
+		*/
+		constructor(opts) {
+			super();
+			this.writable = false;
+			installTimerFunctions(this, opts);
+			this.opts = opts;
+			this.query = opts.query;
+			this.socket = opts.socket;
+			this.supportsBinary = !opts.forceBase64;
+		}
+		/**
+		* Emits an error.
+		*
+		* @param {String} reason
+		* @param description
+		* @param context - the error context
+		* @return {Transport} for chaining
+		* @protected
+		*/
+		onError(reason, description, context) {
+			super.emitReserved("error", new TransportError(reason, description, context));
+			return this;
+		}
+		/**
+		* Opens the transport.
+		*/
+		open() {
+			this.readyState = "opening";
+			this.doOpen();
+			return this;
+		}
+		/**
+		* Closes the transport.
+		*/
+		close() {
+			if (this.readyState === "opening" || this.readyState === "open") {
+				this.doClose();
+				this.onClose();
+			}
+			return this;
+		}
+		/**
+		* Sends multiple packets.
+		*
+		* @param {Array} packets
+		*/
+		send(packets) {
+			if (this.readyState === "open") this.write(packets);
+		}
+		/**
+		* Called upon open
+		*
+		* @protected
+		*/
+		onOpen() {
+			this.readyState = "open";
+			this.writable = true;
+			super.emitReserved("open");
+		}
+		/**
+		* Called with data.
+		*
+		* @param {String} data
+		* @protected
+		*/
+		onData(data) {
+			const packet = decodePacket(data, this.socket.binaryType);
+			this.onPacket(packet);
+		}
+		/**
+		* Called with a decoded packet.
+		*
+		* @protected
+		*/
+		onPacket(packet) {
+			super.emitReserved("packet", packet);
+		}
+		/**
+		* Called upon close.
+		*
+		* @protected
+		*/
+		onClose(details) {
+			this.readyState = "closed";
+			super.emitReserved("close", details);
+		}
+		/**
+		* Pauses the transport, in order not to lose packets during an upgrade.
+		*
+		* @param onPause
+		*/
+		pause(onPause) {}
+		createUri(schema, query = {}) {
+			return schema + "://" + this._hostname() + this._port() + this.opts.path + this._query(query);
+		}
+		_hostname() {
+			const hostname = this.opts.hostname;
+			return hostname.indexOf(":") === -1 ? hostname : "[" + hostname + "]";
+		}
+		_port() {
+			if (this.opts.port && (this.opts.secure && Number(this.opts.port) !== 443 || !this.opts.secure && Number(this.opts.port) !== 80)) return ":" + this.opts.port;
+			else return "";
+		}
+		_query(query) {
+			const encodedQuery = encode(query);
+			return encodedQuery.length ? "?" + encodedQuery : "";
+		}
+	};
+	//#endregion
+	//#region node_modules/engine.io-client/build/esm/transports/polling.js
+	var Polling = class extends Transport {
+		constructor() {
+			super(...arguments);
+			this._polling = false;
+		}
+		get name() {
+			return "polling";
+		}
+		/**
+		* Opens the socket (triggers polling). We write a PING message to determine
+		* when the transport is open.
+		*
+		* @protected
+		*/
+		doOpen() {
+			this._poll();
+		}
+		/**
+		* Pauses polling.
+		*
+		* @param {Function} onPause - callback upon buffers are flushed and transport is paused
+		* @package
+		*/
+		pause(onPause) {
+			this.readyState = "pausing";
+			const pause = () => {
+				this.readyState = "paused";
+				onPause();
+			};
+			if (this._polling || !this.writable) {
+				let total = 0;
+				if (this._polling) {
+					total++;
+					this.once("pollComplete", function() {
+						--total || pause();
+					});
+				}
+				if (!this.writable) {
+					total++;
+					this.once("drain", function() {
+						--total || pause();
+					});
+				}
+			} else pause();
+		}
+		/**
+		* Starts polling cycle.
+		*
+		* @private
+		*/
+		_poll() {
+			this._polling = true;
+			this.doPoll();
+			this.emitReserved("poll");
+		}
+		/**
+		* Overloads onData to detect payloads.
+		*
+		* @protected
+		*/
+		onData(data) {
+			const callback = (packet) => {
+				if ("opening" === this.readyState && packet.type === "open") this.onOpen();
+				if ("close" === packet.type) {
+					this.onClose({ description: "transport closed by the server" });
+					return false;
+				}
+				this.onPacket(packet);
+			};
+			decodePayload(data, this.socket.binaryType).forEach(callback);
+			if ("closed" !== this.readyState) {
+				this._polling = false;
+				this.emitReserved("pollComplete");
+				if ("open" === this.readyState) this._poll();
+			}
+		}
+		/**
+		* For polling, send a close packet.
+		*
+		* @protected
+		*/
+		doClose() {
+			const close = () => {
+				this.write([{ type: "close" }]);
+			};
+			if ("open" === this.readyState) close();
+			else this.once("open", close);
+		}
+		/**
+		* Writes a packets payload.
+		*
+		* @param {Array} packets - data packets
+		* @protected
+		*/
+		write(packets) {
+			this.writable = false;
+			encodePayload(packets, (data) => {
+				this.doWrite(data, () => {
+					this.writable = true;
+					this.emitReserved("drain");
+				});
+			});
+		}
+		/**
+		* Generates uri for connection.
+		*
+		* @private
+		*/
+		uri() {
+			const schema = this.opts.secure ? "https" : "http";
+			const query = this.query || {};
+			if (false !== this.opts.timestampRequests) query[this.opts.timestampParam] = randomString();
+			if (!this.supportsBinary && !query.sid) query.b64 = 1;
+			return this.createUri(schema, query);
+		}
+	};
+	//#endregion
+	//#region node_modules/engine.io-client/build/esm/contrib/has-cors.js
+	var value = false;
+	try {
+		value = typeof XMLHttpRequest !== "undefined" && "withCredentials" in new XMLHttpRequest();
+	} catch (err) {}
+	var hasCORS = value;
+	//#endregion
+	//#region node_modules/engine.io-client/build/esm/transports/polling-xhr.js
+	function empty() {}
+	var BaseXHR = class extends Polling {
+		/**
+		* XHR Polling constructor.
+		*
+		* @param {Object} opts
+		* @package
+		*/
+		constructor(opts) {
+			super(opts);
+			if (typeof location !== "undefined") {
+				const isSSL = "https:" === location.protocol;
+				let port = location.port;
+				if (!port) port = isSSL ? "443" : "80";
+				this.xd = typeof location !== "undefined" && opts.hostname !== location.hostname || port !== opts.port;
+			}
+		}
+		/**
+		* Sends data.
+		*
+		* @param {String} data - data to send.
+		* @param {Function} fn - called upon flush.
+		* @private
+		*/
+		doWrite(data, fn) {
+			const req = this.request({
+				method: "POST",
+				data
+			});
+			req.on("success", fn);
+			req.on("error", (xhrStatus, context) => {
+				this.onError("xhr post error", xhrStatus, context);
+			});
+		}
+		/**
+		* Starts a poll cycle.
+		*
+		* @private
+		*/
+		doPoll() {
+			const req = this.request();
+			req.on("data", this.onData.bind(this));
+			req.on("error", (xhrStatus, context) => {
+				this.onError("xhr poll error", xhrStatus, context);
+			});
+			this.pollXhr = req;
+		}
+	};
+	var Request = class Request extends Emitter {
+		/**
+		* Request constructor
+		*
+		* @param {Object} options
+		* @package
+		*/
+		constructor(createRequest, uri, opts) {
+			super();
+			this.createRequest = createRequest;
+			installTimerFunctions(this, opts);
+			this._opts = opts;
+			this._method = opts.method || "GET";
+			this._uri = uri;
+			this._data = void 0 !== opts.data ? opts.data : null;
+			this._create();
+		}
+		/**
+		* Creates the XHR object and sends the request.
+		*
+		* @private
+		*/
+		_create() {
+			var _a;
+			const opts = pick(this._opts, "agent", "pfx", "key", "passphrase", "cert", "ca", "ciphers", "rejectUnauthorized", "autoUnref");
+			opts.xdomain = !!this._opts.xd;
+			const xhr = this._xhr = this.createRequest(opts);
+			try {
+				xhr.open(this._method, this._uri, true);
+				try {
+					if (this._opts.extraHeaders) {
+						xhr.setDisableHeaderCheck && xhr.setDisableHeaderCheck(true);
+						for (let i in this._opts.extraHeaders) if (this._opts.extraHeaders.hasOwnProperty(i)) xhr.setRequestHeader(i, this._opts.extraHeaders[i]);
+					}
+				} catch (e) {}
+				if ("POST" === this._method) try {
+					xhr.setRequestHeader("Content-type", "text/plain;charset=UTF-8");
+				} catch (e) {}
+				try {
+					xhr.setRequestHeader("Accept", "*/*");
+				} catch (e) {}
+				(_a = this._opts.cookieJar) === null || _a === void 0 || _a.addCookies(xhr);
+				if ("withCredentials" in xhr) xhr.withCredentials = this._opts.withCredentials;
+				if (this._opts.requestTimeout) xhr.timeout = this._opts.requestTimeout;
+				xhr.onreadystatechange = () => {
+					var _a;
+					if (xhr.readyState === 3) (_a = this._opts.cookieJar) === null || _a === void 0 || _a.parseCookies(xhr.getResponseHeader("set-cookie"));
+					if (4 !== xhr.readyState) return;
+					if (200 === xhr.status || 1223 === xhr.status) this._onLoad();
+					else this.setTimeoutFn(() => {
+						this._onError(typeof xhr.status === "number" ? xhr.status : 0);
+					}, 0);
+				};
+				xhr.send(this._data);
+			} catch (e) {
+				this.setTimeoutFn(() => {
+					this._onError(e);
+				}, 0);
+				return;
+			}
+			if (typeof document !== "undefined") {
+				this._index = Request.requestsCount++;
+				Request.requests[this._index] = this;
+			}
+		}
+		/**
+		* Called upon error.
+		*
+		* @private
+		*/
+		_onError(err) {
+			this.emitReserved("error", err, this._xhr);
+			this._cleanup(true);
+		}
+		/**
+		* Cleans up house.
+		*
+		* @private
+		*/
+		_cleanup(fromError) {
+			if ("undefined" === typeof this._xhr || null === this._xhr) return;
+			this._xhr.onreadystatechange = empty;
+			if (fromError) try {
+				this._xhr.abort();
+			} catch (e) {}
+			if (typeof document !== "undefined") delete Request.requests[this._index];
+			this._xhr = null;
+		}
+		/**
+		* Called upon load.
+		*
+		* @private
+		*/
+		_onLoad() {
+			const data = this._xhr.responseText;
+			if (data !== null) {
+				this.emitReserved("data", data);
+				this.emitReserved("success");
+				this._cleanup();
+			}
+		}
+		/**
+		* Aborts the request.
+		*
+		* @package
+		*/
+		abort() {
+			this._cleanup();
+		}
+	};
+	Request.requestsCount = 0;
+	Request.requests = {};
+	/**
+	* Aborts pending requests when unloading the window. This is needed to prevent
+	* memory leaks (e.g. when using IE) and to ensure that no spurious error is
+	* emitted.
+	*/
+	if (typeof document !== "undefined") {
+		if (typeof attachEvent === "function") attachEvent("onunload", unloadHandler);
+		else if (typeof addEventListener === "function") {
+			const terminationEvent = "onpagehide" in globalThisShim ? "pagehide" : "unload";
+			addEventListener(terminationEvent, unloadHandler, false);
+		}
+	}
+	function unloadHandler() {
+		for (let i in Request.requests) if (Request.requests.hasOwnProperty(i)) Request.requests[i].abort();
+	}
+	var hasXHR2 = (function() {
+		const xhr = newRequest({ xdomain: false });
+		return xhr && xhr.responseType !== null;
+	})();
+	/**
+	* HTTP long-polling based on the built-in `XMLHttpRequest` object.
+	*
+	* Usage: browser
+	*
+	* @see https://developer.mozilla.org/en-US/docs/Web/API/XMLHttpRequest
+	*/
+	var XHR = class extends BaseXHR {
+		constructor(opts) {
+			super(opts);
+			const forceBase64 = opts && opts.forceBase64;
+			this.supportsBinary = hasXHR2 && !forceBase64;
+		}
+		request(opts = {}) {
+			Object.assign(opts, { xd: this.xd }, this.opts);
+			return new Request(newRequest, this.uri(), opts);
+		}
+	};
+	function newRequest(opts) {
+		const xdomain = opts.xdomain;
+		try {
+			if ("undefined" !== typeof XMLHttpRequest && (!xdomain || hasCORS)) return new XMLHttpRequest();
+		} catch (e) {}
+		if (!xdomain) try {
+			return new globalThisShim[["Active"].concat("Object").join("X")]("Microsoft.XMLHTTP");
+		} catch (e) {}
+	}
+	//#endregion
+	//#region node_modules/engine.io-client/build/esm/transports/websocket.js
+	var isReactNative = typeof navigator !== "undefined" && typeof navigator.product === "string" && navigator.product.toLowerCase() === "reactnative";
+	var BaseWS = class extends Transport {
+		get name() {
+			return "websocket";
+		}
+		doOpen() {
+			const uri = this.uri();
+			const protocols = this.opts.protocols;
+			const opts = isReactNative ? {} : pick(this.opts, "agent", "perMessageDeflate", "pfx", "key", "passphrase", "cert", "ca", "ciphers", "rejectUnauthorized", "localAddress", "protocolVersion", "origin", "maxPayload", "family", "checkServerIdentity");
+			if (this.opts.extraHeaders) opts.headers = this.opts.extraHeaders;
+			try {
+				this.ws = this.createSocket(uri, protocols, opts);
+			} catch (err) {
+				return this.emitReserved("error", err);
+			}
+			this.ws.binaryType = this.socket.binaryType;
+			this.addEventListeners();
+		}
+		/**
+		* Adds event listeners to the socket
+		*
+		* @private
+		*/
+		addEventListeners() {
+			this.ws.onopen = () => {
+				if (this.opts.autoUnref) this.ws._socket.unref();
+				this.onOpen();
+			};
+			this.ws.onclose = (closeEvent) => this.onClose({
+				description: "websocket connection closed",
+				context: closeEvent
+			});
+			this.ws.onmessage = (ev) => this.onData(ev.data);
+			this.ws.onerror = (e) => this.onError("websocket error", e);
+		}
+		write(packets) {
+			this.writable = false;
+			for (let i = 0; i < packets.length; i++) {
+				const packet = packets[i];
+				const lastPacket = i === packets.length - 1;
+				encodePacket(packet, this.supportsBinary, (data) => {
+					try {
+						this.doWrite(packet, data);
+					} catch (e) {}
+					if (lastPacket) nextTick(() => {
+						this.writable = true;
+						this.emitReserved("drain");
+					}, this.setTimeoutFn);
+				});
+			}
+		}
+		doClose() {
+			if (typeof this.ws !== "undefined") {
+				this.ws.onerror = () => {};
+				this.ws.close();
+				this.ws = null;
+			}
+		}
+		/**
+		* Generates uri for connection.
+		*
+		* @private
+		*/
+		uri() {
+			const schema = this.opts.secure ? "wss" : "ws";
+			const query = this.query || {};
+			if (this.opts.timestampRequests) query[this.opts.timestampParam] = randomString();
+			if (!this.supportsBinary) query.b64 = 1;
+			return this.createUri(schema, query);
+		}
+	};
+	var WebSocketCtor = globalThisShim.WebSocket || globalThisShim.MozWebSocket;
+	/**
+	* WebSocket transport based on the built-in `WebSocket` object.
+	*
+	* Usage: browser, Node.js (since v21), Deno, Bun
+	*
+	* @see https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
+	* @see https://caniuse.com/mdn-api_websocket
+	* @see https://nodejs.org/api/globals.html#websocket
+	*/
+	var WS = class extends BaseWS {
+		createSocket(uri, protocols, opts) {
+			return !isReactNative ? protocols ? new WebSocketCtor(uri, protocols) : new WebSocketCtor(uri) : new WebSocketCtor(uri, protocols, opts);
+		}
+		doWrite(_packet, data) {
+			this.ws.send(data);
+		}
+	};
+	//#endregion
+	//#region node_modules/engine.io-client/build/esm/transports/webtransport.js
+	/**
+	* WebTransport transport based on the built-in `WebTransport` object.
+	*
+	* Usage: browser, Node.js (with the `@fails-components/webtransport` package)
+	*
+	* @see https://developer.mozilla.org/en-US/docs/Web/API/WebTransport
+	* @see https://caniuse.com/webtransport
+	*/
+	var WT = class extends Transport {
+		get name() {
+			return "webtransport";
+		}
+		doOpen() {
+			try {
+				this._transport = new WebTransport(this.createUri("https"), this.opts.transportOptions[this.name]);
+			} catch (err) {
+				return this.emitReserved("error", err);
+			}
+			this._transport.closed.then(() => {
+				this.onClose();
+			}).catch((err) => {
+				this.onError("webtransport error", err);
+			});
+			this._transport.ready.then(() => {
+				this._transport.createBidirectionalStream().then((stream) => {
+					const decoderStream = createPacketDecoderStream(Number.MAX_SAFE_INTEGER, this.socket.binaryType);
+					const reader = stream.readable.pipeThrough(decoderStream).getReader();
+					const encoderStream = createPacketEncoderStream();
+					encoderStream.readable.pipeTo(stream.writable);
+					this._writer = encoderStream.writable.getWriter();
+					const read = () => {
+						reader.read().then(({ done, value }) => {
+							if (done) return;
+							this.onPacket(value);
+							read();
+						}).catch((err) => {});
+					};
+					read();
+					const packet = { type: "open" };
+					if (this.query.sid) packet.data = `{"sid":"${this.query.sid}"}`;
+					this._writer.write(packet).then(() => this.onOpen());
+				});
+			});
+		}
+		write(packets) {
+			this.writable = false;
+			for (let i = 0; i < packets.length; i++) {
+				const packet = packets[i];
+				const lastPacket = i === packets.length - 1;
+				this._writer.write(packet).then(() => {
+					if (lastPacket) nextTick(() => {
+						this.writable = true;
+						this.emitReserved("drain");
+					}, this.setTimeoutFn);
+				});
+			}
+		}
+		doClose() {
+			var _a;
+			(_a = this._transport) === null || _a === void 0 || _a.close();
+		}
+	};
+	//#endregion
+	//#region node_modules/engine.io-client/build/esm/transports/index.js
+	var transports = {
+		websocket: WS,
+		webtransport: WT,
+		polling: XHR
+	};
+	//#endregion
+	//#region node_modules/engine.io-client/build/esm/contrib/parseuri.js
+	/**
+	* Parses a URI
+	*
+	* Note: we could also have used the built-in URL object, but it isn't supported on all platforms.
+	*
+	* See:
+	* - https://developer.mozilla.org/en-US/docs/Web/API/URL
+	* - https://caniuse.com/url
+	* - https://www.rfc-editor.org/rfc/rfc3986#appendix-B
+	*
+	* History of the parse() method:
+	* - first commit: https://github.com/socketio/socket.io-client/commit/4ee1d5d94b3906a9c052b459f1a818b15f38f91c
+	* - export into its own module: https://github.com/socketio/engine.io-client/commit/de2c561e4564efeb78f1bdb1ba39ef81b2822cb3
+	* - reimport: https://github.com/socketio/engine.io-client/commit/df32277c3f6d622eec5ed09f493cae3f3391d242
+	*
+	* @author Steven Levithan <stevenlevithan.com> (MIT license)
+	* @api private
+	*/
+	var re = /^(?:(?![^:@\/?#]+:[^:@\/]*@)(http|https|ws|wss):\/\/)?((?:(([^:@\/?#]*)(?::([^:@\/?#]*))?)?@)?((?:[a-f0-9]{0,4}:){2,7}[a-f0-9]{0,4}|[^:\/?#]*)(?::(\d*))?)(((\/(?:[^?#](?![^?#\/]*\.[^?#\/.]+(?:[?#]|$)))*\/?)?([^?#\/]*))(?:\?([^#]*))?(?:#(.*))?)/;
+	var parts = [
+		"source",
+		"protocol",
+		"authority",
+		"userInfo",
+		"user",
+		"password",
+		"host",
+		"port",
+		"relative",
+		"path",
+		"directory",
+		"file",
+		"query",
+		"anchor"
+	];
+	function parse(str) {
+		if (str.length > 8e3) throw "URI too long";
+		const src = str, b = str.indexOf("["), e = str.indexOf("]");
+		if (b != -1 && e != -1) str = str.substring(0, b) + str.substring(b, e).replace(/:/g, ";") + str.substring(e, str.length);
+		let m = re.exec(str || ""), uri = {}, i = 14;
+		while (i--) uri[parts[i]] = m[i] || "";
+		if (b != -1 && e != -1) {
+			uri.source = src;
+			uri.host = uri.host.substring(1, uri.host.length - 1).replace(/;/g, ":");
+			uri.authority = uri.authority.replace("[", "").replace("]", "").replace(/;/g, ":");
+			uri.ipv6uri = true;
+		}
+		uri.pathNames = pathNames(uri, uri["path"]);
+		uri.queryKey = queryKey(uri, uri["query"]);
+		return uri;
+	}
+	function pathNames(obj, path) {
+		const names = path.replace(/\/{2,9}/g, "/").split("/");
+		if (path.slice(0, 1) == "/" || path.length === 0) names.splice(0, 1);
+		if (path.slice(-1) == "/") names.splice(names.length - 1, 1);
+		return names;
+	}
+	function queryKey(uri, query) {
+		const data = {};
+		query.replace(/(?:^|&)([^&=]*)=?([^&]*)/g, function($0, $1, $2) {
+			if ($1) data[$1] = $2;
+		});
+		return data;
+	}
+	//#endregion
+	//#region node_modules/engine.io-client/build/esm/socket.js
+	var withEventListeners = typeof addEventListener === "function" && typeof removeEventListener === "function";
+	var OFFLINE_EVENT_LISTENERS = [];
+	if (withEventListeners) addEventListener("offline", () => {
+		OFFLINE_EVENT_LISTENERS.forEach((listener) => listener());
+	}, false);
+	/**
+	* This class provides a WebSocket-like interface to connect to an Engine.IO server. The connection will be established
+	* with one of the available low-level transports, like HTTP long-polling, WebSocket or WebTransport.
+	*
+	* This class comes without upgrade mechanism, which means that it will keep the first low-level transport that
+	* successfully establishes the connection.
+	*
+	* In order to allow tree-shaking, there are no transports included, that's why the `transports` option is mandatory.
+	*
+	* @example
+	* import { SocketWithoutUpgrade, WebSocket } from "engine.io-client";
+	*
+	* const socket = new SocketWithoutUpgrade({
+	*   transports: [WebSocket]
+	* });
+	*
+	* socket.on("open", () => {
+	*   socket.send("hello");
+	* });
+	*
+	* @see SocketWithUpgrade
+	* @see Socket
+	*/
+	var SocketWithoutUpgrade = class SocketWithoutUpgrade extends Emitter {
+		/**
+		* Socket constructor.
+		*
+		* @param {String|Object} uri - uri or options
+		* @param {Object} opts - options
+		*/
+		constructor(uri, opts) {
+			super();
+			this.binaryType = defaultBinaryType;
+			this.writeBuffer = [];
+			this._prevBufferLen = 0;
+			this._pingInterval = -1;
+			this._pingTimeout = -1;
+			this._maxPayload = -1;
+			/**
+			* The expiration timestamp of the {@link _pingTimeoutTimer} object is tracked, in case the timer is throttled and the
+			* callback is not fired on time. This can happen for example when a laptop is suspended or when a phone is locked.
+			*/
+			this._pingTimeoutTime = Infinity;
+			if (uri && "object" === typeof uri) {
+				opts = uri;
+				uri = null;
+			}
+			if (uri) {
+				const parsedUri = parse(uri);
+				opts.hostname = parsedUri.host;
+				opts.secure = parsedUri.protocol === "https" || parsedUri.protocol === "wss";
+				opts.port = parsedUri.port;
+				if (parsedUri.query) opts.query = parsedUri.query;
+			} else if (opts.host) opts.hostname = parse(opts.host).host;
+			installTimerFunctions(this, opts);
+			this.secure = null != opts.secure ? opts.secure : typeof location !== "undefined" && "https:" === location.protocol;
+			if (opts.hostname && !opts.port) opts.port = this.secure ? "443" : "80";
+			this.hostname = opts.hostname || (typeof location !== "undefined" ? location.hostname : "localhost");
+			this.port = opts.port || (typeof location !== "undefined" && location.port ? location.port : this.secure ? "443" : "80");
+			this.transports = [];
+			this._transportsByName = {};
+			opts.transports.forEach((t) => {
+				const transportName = t.prototype.name;
+				this.transports.push(transportName);
+				this._transportsByName[transportName] = t;
+			});
+			this.opts = Object.assign({
+				path: "/engine.io",
+				agent: false,
+				withCredentials: false,
+				upgrade: true,
+				timestampParam: "t",
+				rememberUpgrade: false,
+				addTrailingSlash: true,
+				rejectUnauthorized: true,
+				perMessageDeflate: { threshold: 1024 },
+				transportOptions: {},
+				closeOnBeforeunload: false
+			}, opts);
+			this.opts.path = this.opts.path.replace(/\/$/, "") + (this.opts.addTrailingSlash ? "/" : "");
+			if (typeof this.opts.query === "string") this.opts.query = decode(this.opts.query);
+			if (withEventListeners) {
+				if (this.opts.closeOnBeforeunload) {
+					this._beforeunloadEventListener = () => {
+						if (this.transport) {
+							this.transport.removeAllListeners();
+							this.transport.close();
+						}
+					};
+					addEventListener("beforeunload", this._beforeunloadEventListener, false);
+				}
+				if (this.hostname !== "localhost") {
+					this._offlineEventListener = () => {
+						this._onClose("transport close", { description: "network connection lost" });
+					};
+					OFFLINE_EVENT_LISTENERS.push(this._offlineEventListener);
+				}
+			}
+			if (this.opts.withCredentials) this._cookieJar = void 0;
+			this._open();
+		}
+		/**
+		* Creates transport of the given type.
+		*
+		* @param {String} name - transport name
+		* @return {Transport}
+		* @private
+		*/
+		createTransport(name) {
+			const query = Object.assign({}, this.opts.query);
+			query.EIO = 4;
+			query.transport = name;
+			if (this.id) query.sid = this.id;
+			const opts = Object.assign({}, this.opts, {
+				query,
+				socket: this,
+				hostname: this.hostname,
+				secure: this.secure,
+				port: this.port
+			}, this.opts.transportOptions[name]);
+			return new this._transportsByName[name](opts);
+		}
+		/**
+		* Initializes transport to use and starts probe.
+		*
+		* @private
+		*/
+		_open() {
+			if (this.transports.length === 0) {
+				this.setTimeoutFn(() => {
+					this.emitReserved("error", "No transports available");
+				}, 0);
+				return;
+			}
+			const transportName = this.opts.rememberUpgrade && SocketWithoutUpgrade.priorWebsocketSuccess && this.transports.indexOf("websocket") !== -1 ? "websocket" : this.transports[0];
+			this.readyState = "opening";
+			const transport = this.createTransport(transportName);
+			transport.open();
+			this.setTransport(transport);
+		}
+		/**
+		* Sets the current transport. Disables the existing one (if any).
+		*
+		* @private
+		*/
+		setTransport(transport) {
+			if (this.transport) this.transport.removeAllListeners();
+			this.transport = transport;
+			transport.on("drain", this._onDrain.bind(this)).on("packet", this._onPacket.bind(this)).on("error", this._onError.bind(this)).on("close", (reason) => this._onClose("transport close", reason));
+		}
+		/**
+		* Called when connection is deemed open.
+		*
+		* @private
+		*/
+		onOpen() {
+			this.readyState = "open";
+			SocketWithoutUpgrade.priorWebsocketSuccess = "websocket" === this.transport.name;
+			this.emitReserved("open");
+			this.flush();
+		}
+		/**
+		* Handles a packet.
+		*
+		* @private
+		*/
+		_onPacket(packet) {
+			if ("opening" === this.readyState || "open" === this.readyState || "closing" === this.readyState) {
+				this.emitReserved("packet", packet);
+				this.emitReserved("heartbeat");
+				switch (packet.type) {
+					case "open":
+						this.onHandshake(JSON.parse(packet.data));
+						break;
+					case "ping":
+						this._sendPacket("pong");
+						this.emitReserved("ping");
+						this.emitReserved("pong");
+						this._resetPingTimeout();
+						break;
+					case "error":
+						const err = /* @__PURE__ */ new Error("server error");
+						err.code = packet.data;
+						this._onError(err);
+						break;
+					case "message":
+						this.emitReserved("data", packet.data);
+						this.emitReserved("message", packet.data);
+						break;
+				}
+			}
+		}
+		/**
+		* Called upon handshake completion.
+		*
+		* @param {Object} data - handshake obj
+		* @private
+		*/
+		onHandshake(data) {
+			this.emitReserved("handshake", data);
+			this.id = data.sid;
+			this.transport.query.sid = data.sid;
+			this._pingInterval = data.pingInterval;
+			this._pingTimeout = data.pingTimeout;
+			this._maxPayload = data.maxPayload;
+			this.onOpen();
+			if ("closed" === this.readyState) return;
+			this._resetPingTimeout();
+		}
+		/**
+		* Sets and resets ping timeout timer based on server pings.
+		*
+		* @private
+		*/
+		_resetPingTimeout() {
+			this.clearTimeoutFn(this._pingTimeoutTimer);
+			const delay = this._pingInterval + this._pingTimeout;
+			this._pingTimeoutTime = Date.now() + delay;
+			this._pingTimeoutTimer = this.setTimeoutFn(() => {
+				this._onClose("ping timeout");
+			}, delay);
+			if (this.opts.autoUnref) this._pingTimeoutTimer.unref();
+		}
+		/**
+		* Called on `drain` event
+		*
+		* @private
+		*/
+		_onDrain() {
+			this.writeBuffer.splice(0, this._prevBufferLen);
+			this._prevBufferLen = 0;
+			if (0 === this.writeBuffer.length) this.emitReserved("drain");
+			else this.flush();
+		}
+		/**
+		* Flush write buffers.
+		*
+		* @private
+		*/
+		flush() {
+			if ("closed" !== this.readyState && this.transport.writable && !this.upgrading && this.writeBuffer.length) {
+				const packets = this._getWritablePackets();
+				this.transport.send(packets);
+				this._prevBufferLen = packets.length;
+				this.emitReserved("flush");
+			}
+		}
+		/**
+		* Ensure the encoded size of the writeBuffer is below the maxPayload value sent by the server (only for HTTP
+		* long-polling)
+		*
+		* @private
+		*/
+		_getWritablePackets() {
+			if (!(this._maxPayload && this.transport.name === "polling" && this.writeBuffer.length > 1)) return this.writeBuffer;
+			let payloadSize = 1;
+			for (let i = 0; i < this.writeBuffer.length; i++) {
+				const data = this.writeBuffer[i].data;
+				if (data) payloadSize += byteLength(data);
+				if (i > 0 && payloadSize > this._maxPayload) return this.writeBuffer.slice(0, i);
+				payloadSize += 2;
+			}
+			return this.writeBuffer;
+		}
+		/**
+		* Checks whether the heartbeat timer has expired but the socket has not yet been notified.
+		*
+		* Note: this method is private for now because it does not really fit the WebSocket API, but if we put it in the
+		* `write()` method then the message would not be buffered by the Socket.IO client.
+		*
+		* @return {boolean}
+		* @private
+		*/
+		_hasPingExpired() {
+			if (!this._pingTimeoutTime) return true;
+			const hasExpired = Date.now() > this._pingTimeoutTime;
+			if (hasExpired) {
+				this._pingTimeoutTime = 0;
+				nextTick(() => {
+					this._onClose("ping timeout");
+				}, this.setTimeoutFn);
+			}
+			return hasExpired;
+		}
+		/**
+		* Sends a message.
+		*
+		* @param {String} msg - message.
+		* @param {Object} options.
+		* @param {Function} fn - callback function.
+		* @return {Socket} for chaining.
+		*/
+		write(msg, options, fn) {
+			this._sendPacket("message", msg, options, fn);
+			return this;
+		}
+		/**
+		* Sends a message. Alias of {@link Socket#write}.
+		*
+		* @param {String} msg - message.
+		* @param {Object} options.
+		* @param {Function} fn - callback function.
+		* @return {Socket} for chaining.
+		*/
+		send(msg, options, fn) {
+			this._sendPacket("message", msg, options, fn);
+			return this;
+		}
+		/**
+		* Sends a packet.
+		*
+		* @param {String} type - packet type.
+		* @param {String} data.
+		* @param {Object} options.
+		* @param {Function} fn - callback function.
+		* @private
+		*/
+		_sendPacket(type, data, options, fn) {
+			if ("function" === typeof data) {
+				fn = data;
+				data = void 0;
+			}
+			if ("function" === typeof options) {
+				fn = options;
+				options = null;
+			}
+			if ("closing" === this.readyState || "closed" === this.readyState) return;
+			options = options || {};
+			options.compress = false !== options.compress;
+			const packet = {
+				type,
+				data,
+				options
+			};
+			this.emitReserved("packetCreate", packet);
+			this.writeBuffer.push(packet);
+			if (fn) this.once("flush", fn);
+			this.flush();
+		}
+		/**
+		* Closes the connection.
+		*/
+		close() {
+			const close = () => {
+				this._onClose("forced close");
+				this.transport.close();
+			};
+			const cleanupAndClose = () => {
+				this.off("upgrade", cleanupAndClose);
+				this.off("upgradeError", cleanupAndClose);
+				close();
+			};
+			const waitForUpgrade = () => {
+				this.once("upgrade", cleanupAndClose);
+				this.once("upgradeError", cleanupAndClose);
+			};
+			if ("opening" === this.readyState || "open" === this.readyState) {
+				this.readyState = "closing";
+				if (this.writeBuffer.length) this.once("drain", () => {
+					if (this.upgrading) waitForUpgrade();
+					else close();
+				});
+				else if (this.upgrading) waitForUpgrade();
+				else close();
+			}
+			return this;
+		}
+		/**
+		* Called upon transport error
+		*
+		* @private
+		*/
+		_onError(err) {
+			SocketWithoutUpgrade.priorWebsocketSuccess = false;
+			if (this.opts.tryAllTransports && this.transports.length > 1 && this.readyState === "opening") {
+				this.transports.shift();
+				return this._open();
+			}
+			this.emitReserved("error", err);
+			this._onClose("transport error", err);
+		}
+		/**
+		* Called upon transport close.
+		*
+		* @private
+		*/
+		_onClose(reason, description) {
+			if ("opening" === this.readyState || "open" === this.readyState || "closing" === this.readyState) {
+				this.clearTimeoutFn(this._pingTimeoutTimer);
+				this.transport.removeAllListeners("close");
+				this.transport.close();
+				this.transport.removeAllListeners();
+				if (withEventListeners) {
+					if (this._beforeunloadEventListener) removeEventListener("beforeunload", this._beforeunloadEventListener, false);
+					if (this._offlineEventListener) {
+						const i = OFFLINE_EVENT_LISTENERS.indexOf(this._offlineEventListener);
+						if (i !== -1) OFFLINE_EVENT_LISTENERS.splice(i, 1);
+					}
+				}
+				this.readyState = "closed";
+				this.id = null;
+				this.emitReserved("close", reason, description);
+				this.writeBuffer = [];
+				this._prevBufferLen = 0;
+			}
+		}
+	};
+	SocketWithoutUpgrade.protocol = 4;
+	/**
+	* This class provides a WebSocket-like interface to connect to an Engine.IO server. The connection will be established
+	* with one of the available low-level transports, like HTTP long-polling, WebSocket or WebTransport.
+	*
+	* This class comes with an upgrade mechanism, which means that once the connection is established with the first
+	* low-level transport, it will try to upgrade to a better transport.
+	*
+	* In order to allow tree-shaking, there are no transports included, that's why the `transports` option is mandatory.
+	*
+	* @example
+	* import { SocketWithUpgrade, WebSocket } from "engine.io-client";
+	*
+	* const socket = new SocketWithUpgrade({
+	*   transports: [WebSocket]
+	* });
+	*
+	* socket.on("open", () => {
+	*   socket.send("hello");
+	* });
+	*
+	* @see SocketWithoutUpgrade
+	* @see Socket
+	*/
+	var SocketWithUpgrade = class extends SocketWithoutUpgrade {
+		constructor() {
+			super(...arguments);
+			this._upgrades = [];
+		}
+		onOpen() {
+			super.onOpen();
+			if ("open" === this.readyState && this.opts.upgrade) for (let i = 0; i < this._upgrades.length; i++) this._probe(this._upgrades[i]);
+		}
+		/**
+		* Probes a transport.
+		*
+		* @param {String} name - transport name
+		* @private
+		*/
+		_probe(name) {
+			let transport = this.createTransport(name);
+			let failed = false;
+			SocketWithoutUpgrade.priorWebsocketSuccess = false;
+			const onTransportOpen = () => {
+				if (failed) return;
+				transport.send([{
+					type: "ping",
+					data: "probe"
+				}]);
+				transport.once("packet", (msg) => {
+					if (failed) return;
+					if ("pong" === msg.type && "probe" === msg.data) {
+						this.upgrading = true;
+						this.emitReserved("upgrading", transport);
+						if (!transport) return;
+						SocketWithoutUpgrade.priorWebsocketSuccess = "websocket" === transport.name;
+						this.transport.pause(() => {
+							if (failed) return;
+							if ("closed" === this.readyState) return;
+							cleanup();
+							this.setTransport(transport);
+							transport.send([{ type: "upgrade" }]);
+							this.emitReserved("upgrade", transport);
+							transport = null;
+							this.upgrading = false;
+							this.flush();
+						});
+					} else {
+						const err = /* @__PURE__ */ new Error("probe error");
+						err.transport = transport.name;
+						this.emitReserved("upgradeError", err);
+					}
+				});
+			};
+			function freezeTransport() {
+				if (failed) return;
+				failed = true;
+				cleanup();
+				transport.close();
+				transport = null;
+			}
+			const onerror = (err) => {
+				const error = /* @__PURE__ */ new Error("probe error: " + err);
+				error.transport = transport.name;
+				freezeTransport();
+				this.emitReserved("upgradeError", error);
+			};
+			function onTransportClose() {
+				onerror("transport closed");
+			}
+			function onclose() {
+				onerror("socket closed");
+			}
+			function onupgrade(to) {
+				if (transport && to.name !== transport.name) freezeTransport();
+			}
+			const cleanup = () => {
+				transport.removeListener("open", onTransportOpen);
+				transport.removeListener("error", onerror);
+				transport.removeListener("close", onTransportClose);
+				this.off("close", onclose);
+				this.off("upgrading", onupgrade);
+			};
+			transport.once("open", onTransportOpen);
+			transport.once("error", onerror);
+			transport.once("close", onTransportClose);
+			this.once("close", onclose);
+			this.once("upgrading", onupgrade);
+			if (this._upgrades.indexOf("webtransport") !== -1 && name !== "webtransport") this.setTimeoutFn(() => {
+				if (!failed) transport.open();
+			}, 200);
+			else transport.open();
+		}
+		onHandshake(data) {
+			this._upgrades = this._filterUpgrades(data.upgrades);
+			super.onHandshake(data);
+		}
+		/**
+		* Filters upgrades, returning only those matching client transports.
+		*
+		* @param {Array} upgrades - server upgrades
+		* @private
+		*/
+		_filterUpgrades(upgrades) {
+			const filteredUpgrades = [];
+			for (let i = 0; i < upgrades.length; i++) if (~this.transports.indexOf(upgrades[i])) filteredUpgrades.push(upgrades[i]);
+			return filteredUpgrades;
+		}
+	};
+	/**
+	* This class provides a WebSocket-like interface to connect to an Engine.IO server. The connection will be established
+	* with one of the available low-level transports, like HTTP long-polling, WebSocket or WebTransport.
+	*
+	* This class comes with an upgrade mechanism, which means that once the connection is established with the first
+	* low-level transport, it will try to upgrade to a better transport.
+	*
+	* @example
+	* import { Socket } from "engine.io-client";
+	*
+	* const socket = new Socket();
+	*
+	* socket.on("open", () => {
+	*   socket.send("hello");
+	* });
+	*
+	* @see SocketWithoutUpgrade
+	* @see SocketWithUpgrade
+	*/
+	var Socket$1 = class extends SocketWithUpgrade {
+		constructor(uri, opts = {}) {
+			const isOptionsOnly = typeof uri === "object";
+			const o = isOptionsOnly ? { ...uri } : { ...opts };
+			if (!o.transports || o.transports && typeof o.transports[0] === "string") o.transports = (o.transports || [
+				"polling",
+				"websocket",
+				"webtransport"
+			]).map((transportName) => transports[transportName]).filter((t) => !!t);
+			super(isOptionsOnly ? o : uri, o);
+		}
+	};
+	Socket$1.protocol;
+	//#endregion
+	//#region node_modules/socket.io-client/build/esm/url.js
+	/**
+	* URL parser.
+	*
+	* @param uri - url
+	* @param path - the request path of the connection
+	* @param loc - An object meant to mimic window.location.
+	*        Defaults to window.location.
+	* @public
+	*/
+	function url(uri, path = "", loc) {
+		let obj = uri;
+		loc = loc || typeof location !== "undefined" && location;
+		if (null == uri) uri = loc.protocol + "//" + loc.host;
+		if (typeof uri === "string") {
+			if ("/" === uri.charAt(0)) if ("/" === uri.charAt(1)) uri = loc.protocol + uri;
+			else uri = loc.host + uri;
+			if (!/^(https?|wss?):\/\//.test(uri)) if ("undefined" !== typeof loc) uri = loc.protocol + "//" + uri;
+			else uri = "https://" + uri;
+			obj = parse(uri);
+		}
+		if (!obj.port) {
+			if (/^(http|ws)$/.test(obj.protocol)) obj.port = "80";
+			else if (/^(http|ws)s$/.test(obj.protocol)) obj.port = "443";
+		}
+		obj.path = obj.path || "/";
+		const host = obj.host.indexOf(":") !== -1 ? "[" + obj.host + "]" : obj.host;
+		obj.id = obj.protocol + "://" + host + ":" + obj.port + path;
+		obj.href = obj.protocol + "://" + host + (loc && loc.port === obj.port ? "" : ":" + obj.port);
+		return obj;
+	}
+	//#endregion
+	//#region node_modules/socket.io-parser/build/esm/is-binary.js
+	var withNativeArrayBuffer = typeof ArrayBuffer === "function";
+	var isView = (obj) => {
+		return typeof ArrayBuffer.isView === "function" ? ArrayBuffer.isView(obj) : obj.buffer instanceof ArrayBuffer;
+	};
+	var toString = Object.prototype.toString;
+	var withNativeBlob = typeof Blob === "function" || typeof Blob !== "undefined" && toString.call(Blob) === "[object BlobConstructor]";
+	var withNativeFile = typeof File === "function" || typeof File !== "undefined" && toString.call(File) === "[object FileConstructor]";
+	/**
+	* Returns true if obj is a Buffer, an ArrayBuffer, a Blob or a File.
+	*
+	* @private
+	*/
+	function isBinary(obj) {
+		return withNativeArrayBuffer && (obj instanceof ArrayBuffer || isView(obj)) || withNativeBlob && obj instanceof Blob || withNativeFile && obj instanceof File;
+	}
+	function hasBinary(obj, toJSON) {
+		if (!obj || typeof obj !== "object") return false;
+		if (Array.isArray(obj)) {
+			for (let i = 0, l = obj.length; i < l; i++) if (hasBinary(obj[i])) return true;
+			return false;
+		}
+		if (isBinary(obj)) return true;
+		if (obj.toJSON && typeof obj.toJSON === "function" && arguments.length === 1) return hasBinary(obj.toJSON(), true);
+		for (const key in obj) if (Object.prototype.hasOwnProperty.call(obj, key) && hasBinary(obj[key])) return true;
+		return false;
+	}
+	//#endregion
+	//#region node_modules/socket.io-parser/build/esm/binary.js
+	/**
+	* Replaces every Buffer | ArrayBuffer | Blob | File in packet with a numbered placeholder.
+	*
+	* @param {Object} packet - socket.io event packet
+	* @return {Object} with deconstructed packet and list of buffers
+	* @public
+	*/
+	function deconstructPacket(packet) {
+		const buffers = [];
+		const packetData = packet.data;
+		const pack = packet;
+		pack.data = _deconstructPacket(packetData, buffers);
+		pack.attachments = buffers.length;
+		return {
+			packet: pack,
+			buffers
+		};
+	}
+	function _deconstructPacket(data, buffers, toJSON) {
+		if (!data) return data;
+		if (isBinary(data)) {
+			const placeholder = {
+				_placeholder: true,
+				num: buffers.length
+			};
+			buffers.push(data);
+			return placeholder;
+		} else if (Array.isArray(data)) {
+			const newData = new Array(data.length);
+			for (let i = 0; i < data.length; i++) newData[i] = _deconstructPacket(data[i], buffers);
+			return newData;
+		} else if (typeof data === "object" && !(data instanceof Date)) {
+			if (data.toJSON && typeof data.toJSON === "function" && !toJSON) return _deconstructPacket(data.toJSON(), buffers, true);
+			const newData = {};
+			for (const key in data) if (Object.prototype.hasOwnProperty.call(data, key)) newData[key] = _deconstructPacket(data[key], buffers);
+			return newData;
+		}
+		return data;
+	}
+	/**
+	* Reconstructs a binary packet from its placeholder packet and buffers
+	*
+	* @param {Object} packet - event packet with placeholders
+	* @param {Array} buffers - binary buffers to put in placeholder positions
+	* @return {Object} reconstructed packet
+	* @public
+	*/
+	function reconstructPacket(packet, buffers) {
+		packet.data = _reconstructPacket(packet.data, buffers);
+		delete packet.attachments;
+		return packet;
+	}
+	function _reconstructPacket(data, buffers) {
+		if (!data) return data;
+		if (data && data._placeholder === true) if (typeof data.num === "number" && data.num >= 0 && data.num < buffers.length) return buffers[data.num];
+		else throw new Error("illegal attachments");
+		else if (Array.isArray(data)) for (let i = 0; i < data.length; i++) data[i] = _reconstructPacket(data[i], buffers);
+		else if (typeof data === "object") {
+			for (const key in data) if (Object.prototype.hasOwnProperty.call(data, key)) data[key] = _reconstructPacket(data[key], buffers);
+		}
+		return data;
+	}
+	//#endregion
+	//#region node_modules/socket.io-parser/build/esm/index.js
+	var esm_exports = /* @__PURE__ */ __exportAll({
+		Decoder: () => Decoder,
+		Encoder: () => Encoder,
+		PacketType: () => PacketType,
+		isPacketValid: () => isPacketValid,
+		protocol: () => 5
+	});
+	/**
+	* These strings must not be used as event names, as they have a special meaning.
+	*/
+	var RESERVED_EVENTS$1 = [
+		"connect",
+		"connect_error",
+		"disconnect",
+		"disconnecting",
+		"newListener",
+		"removeListener"
+	];
+	var PacketType;
+	(function(PacketType) {
+		PacketType[PacketType["CONNECT"] = 0] = "CONNECT";
+		PacketType[PacketType["DISCONNECT"] = 1] = "DISCONNECT";
+		PacketType[PacketType["EVENT"] = 2] = "EVENT";
+		PacketType[PacketType["ACK"] = 3] = "ACK";
+		PacketType[PacketType["CONNECT_ERROR"] = 4] = "CONNECT_ERROR";
+		PacketType[PacketType["BINARY_EVENT"] = 5] = "BINARY_EVENT";
+		PacketType[PacketType["BINARY_ACK"] = 6] = "BINARY_ACK";
+	})(PacketType || (PacketType = {}));
+	/**
+	* A socket.io Encoder instance
+	*/
+	var Encoder = class {
+		/**
+		* Encoder constructor
+		*
+		* @param {function} replacer - custom replacer to pass down to JSON.parse
+		*/
+		constructor(replacer) {
+			this.replacer = replacer;
+		}
+		/**
+		* Encode a packet as a single string if non-binary, or as a
+		* buffer sequence, depending on packet type.
+		*
+		* @param {Object} obj - packet object
+		*/
+		encode(obj) {
+			if (obj.type === PacketType.EVENT || obj.type === PacketType.ACK) {
+				if (hasBinary(obj)) return this.encodeAsBinary({
+					type: obj.type === PacketType.EVENT ? PacketType.BINARY_EVENT : PacketType.BINARY_ACK,
+					nsp: obj.nsp,
+					data: obj.data,
+					id: obj.id
+				});
+			}
+			return [this.encodeAsString(obj)];
+		}
+		/**
+		* Encode packet as string.
+		*/
+		encodeAsString(obj) {
+			let str = "" + obj.type;
+			if (obj.type === PacketType.BINARY_EVENT || obj.type === PacketType.BINARY_ACK) str += obj.attachments + "-";
+			if (obj.nsp && "/" !== obj.nsp) str += obj.nsp + ",";
+			if (null != obj.id) str += obj.id;
+			if (null != obj.data) str += JSON.stringify(obj.data, this.replacer);
+			return str;
+		}
+		/**
+		* Encode packet as 'buffer sequence' by removing blobs, and
+		* deconstructing packet into object with placeholders and
+		* a list of buffers.
+		*/
+		encodeAsBinary(obj) {
+			const deconstruction = deconstructPacket(obj);
+			const pack = this.encodeAsString(deconstruction.packet);
+			const buffers = deconstruction.buffers;
+			buffers.unshift(pack);
+			return buffers;
+		}
+	};
+	/**
+	* A socket.io Decoder instance
+	*
+	* @return {Object} decoder
+	*/
+	var Decoder = class Decoder extends Emitter {
+		/**
+		* Decoder constructor
+		*/
+		constructor(opts) {
+			super();
+			this.opts = Object.assign({
+				reviver: void 0,
+				maxAttachments: 10
+			}, typeof opts === "function" ? { reviver: opts } : opts);
+		}
+		/**
+		* Decodes an encoded packet string into packet JSON.
+		*
+		* @param {String} obj - encoded packet
+		*/
+		add(obj) {
+			let packet;
+			if (typeof obj === "string") {
+				if (this.reconstructor) throw new Error("got plaintext data when reconstructing a packet");
+				packet = this.decodeString(obj);
+				const isBinaryEvent = packet.type === PacketType.BINARY_EVENT;
+				if (isBinaryEvent || packet.type === PacketType.BINARY_ACK) {
+					packet.type = isBinaryEvent ? PacketType.EVENT : PacketType.ACK;
+					this.reconstructor = new BinaryReconstructor(packet);
+				} else super.emitReserved("decoded", packet);
+			} else if (isBinary(obj) || obj.base64) if (!this.reconstructor) throw new Error("got binary data when not reconstructing a packet");
+			else {
+				packet = this.reconstructor.takeBinaryData(obj);
+				if (packet) {
+					this.reconstructor = null;
+					super.emitReserved("decoded", packet);
+				}
+			}
+			else throw new Error("Unknown type: " + obj);
+		}
+		/**
+		* Decode a packet String (JSON data)
+		*
+		* @param {String} str
+		* @return {Object} packet
+		*/
+		decodeString(str) {
+			let i = 0;
+			const p = { type: Number(str.charAt(0)) };
+			if (PacketType[p.type] === void 0) throw new Error("unknown packet type " + p.type);
+			if (p.type === PacketType.BINARY_EVENT || p.type === PacketType.BINARY_ACK) {
+				const start = i + 1;
+				while (str.charAt(++i) !== "-" && i != str.length);
+				const buf = str.substring(start, i);
+				if (buf != Number(buf) || str.charAt(i) !== "-") throw new Error("Illegal attachments");
+				const n = Number(buf);
+				if (!isInteger(n) || n < 1) throw new Error("Illegal attachments");
+				else if (n > this.opts.maxAttachments) throw new Error("too many attachments");
+				p.attachments = n;
+			}
+			if ("/" === str.charAt(i + 1)) {
+				const start = i + 1;
+				while (++i) {
+					if ("," === str.charAt(i)) break;
+					if (i === str.length) break;
+				}
+				p.nsp = str.substring(start, i);
+			} else p.nsp = "/";
+			const next = str.charAt(i + 1);
+			if ("" !== next && Number(next) == next) {
+				const start = i + 1;
+				while (++i) {
+					const c = str.charAt(i);
+					if (null == c || Number(c) != c) {
+						--i;
+						break;
+					}
+					if (i === str.length) break;
+				}
+				p.id = Number(str.substring(start, i + 1));
+			}
+			if (str.charAt(++i)) {
+				const payload = this.tryParse(str.substr(i));
+				if (Decoder.isPayloadValid(p.type, payload)) p.data = payload;
+				else throw new Error("invalid payload");
+			}
+			return p;
+		}
+		tryParse(str) {
+			try {
+				return JSON.parse(str, this.opts.reviver);
+			} catch (e) {
+				return false;
+			}
+		}
+		static isPayloadValid(type, payload) {
+			switch (type) {
+				case PacketType.CONNECT: return isObject(payload);
+				case PacketType.DISCONNECT: return payload === void 0;
+				case PacketType.CONNECT_ERROR: return typeof payload === "string" || isObject(payload);
+				case PacketType.EVENT:
+				case PacketType.BINARY_EVENT: return Array.isArray(payload) && (typeof payload[0] === "number" || typeof payload[0] === "string" && RESERVED_EVENTS$1.indexOf(payload[0]) === -1);
+				case PacketType.ACK:
+				case PacketType.BINARY_ACK: return Array.isArray(payload);
+			}
+		}
+		/**
+		* Deallocates a parser's resources
+		*/
+		destroy() {
+			if (this.reconstructor) {
+				this.reconstructor.finishedReconstruction();
+				this.reconstructor = null;
+			}
+		}
+	};
+	/**
+	* A manager of a binary event's 'buffer sequence'. Should
+	* be constructed whenever a packet of type BINARY_EVENT is
+	* decoded.
+	*
+	* @param {Object} packet
+	* @return {BinaryReconstructor} initialized reconstructor
+	*/
+	var BinaryReconstructor = class {
+		constructor(packet) {
+			this.packet = packet;
+			this.buffers = [];
+			this.reconPack = packet;
+		}
+		/**
+		* Method to be called when binary data received from connection
+		* after a BINARY_EVENT packet.
+		*
+		* @param {Buffer | ArrayBuffer} binData - the raw binary data received
+		* @return {null | Object} returns null if more binary data is expected or
+		*   a reconstructed packet object if all buffers have been received.
+		*/
+		takeBinaryData(binData) {
+			this.buffers.push(binData);
+			if (this.buffers.length === this.reconPack.attachments) {
+				const packet = reconstructPacket(this.reconPack, this.buffers);
+				this.finishedReconstruction();
+				return packet;
+			}
+			return null;
+		}
+		/**
+		* Cleans up binary packet reconstruction variables.
+		*/
+		finishedReconstruction() {
+			this.reconPack = null;
+			this.buffers = [];
+		}
+	};
+	function isNamespaceValid(nsp) {
+		return typeof nsp === "string";
+	}
+	var isInteger = Number.isInteger || function(value) {
+		return typeof value === "number" && isFinite(value) && Math.floor(value) === value;
+	};
+	function isAckIdValid(id) {
+		return id === void 0 || isInteger(id);
+	}
+	function isObject(value) {
+		return Object.prototype.toString.call(value) === "[object Object]";
+	}
+	function isDataValid(type, payload) {
+		switch (type) {
+			case PacketType.CONNECT: return payload === void 0 || isObject(payload);
+			case PacketType.DISCONNECT: return payload === void 0;
+			case PacketType.EVENT: return Array.isArray(payload) && (typeof payload[0] === "number" || typeof payload[0] === "string" && RESERVED_EVENTS$1.indexOf(payload[0]) === -1);
+			case PacketType.ACK: return Array.isArray(payload);
+			case PacketType.CONNECT_ERROR: return typeof payload === "string" || isObject(payload);
+			default: return false;
+		}
+	}
+	function isPacketValid(packet) {
+		return isNamespaceValid(packet.nsp) && isAckIdValid(packet.id) && isDataValid(packet.type, packet.data);
+	}
+	//#endregion
+	//#region node_modules/socket.io-client/build/esm/on.js
+	function on(obj, ev, fn) {
+		obj.on(ev, fn);
+		return function subDestroy() {
+			obj.off(ev, fn);
+		};
+	}
+	//#endregion
+	//#region node_modules/socket.io-client/build/esm/socket.js
+	/**
+	* Internal events.
+	* These events can't be emitted by the user.
+	*/
+	var RESERVED_EVENTS = Object.freeze({
+		connect: 1,
+		connect_error: 1,
+		disconnect: 1,
+		disconnecting: 1,
+		newListener: 1,
+		removeListener: 1
+	});
+	/**
+	* A Socket is the fundamental class for interacting with the server.
+	*
+	* A Socket belongs to a certain Namespace (by default /) and uses an underlying {@link Manager} to communicate.
+	*
+	* @example
+	* const socket = io();
+	*
+	* socket.on("connect", () => {
+	*   console.log("connected");
+	* });
+	*
+	* // send an event to the server
+	* socket.emit("foo", "bar");
+	*
+	* socket.on("foobar", () => {
+	*   // an event was received from the server
+	* });
+	*
+	* // upon disconnection
+	* socket.on("disconnect", (reason) => {
+	*   console.log(`disconnected due to ${reason}`);
+	* });
+	*/
+	var Socket = class extends Emitter {
+		/**
+		* `Socket` constructor.
+		*/
+		constructor(io, nsp, opts) {
+			super();
+			/**
+			* Whether the socket is currently connected to the server.
+			*
+			* @example
+			* const socket = io();
+			*
+			* socket.on("connect", () => {
+			*   console.log(socket.connected); // true
+			* });
+			*
+			* socket.on("disconnect", () => {
+			*   console.log(socket.connected); // false
+			* });
+			*/
+			this.connected = false;
+			/**
+			* Whether the connection state was recovered after a temporary disconnection. In that case, any missed packets will
+			* be transmitted by the server.
+			*/
+			this.recovered = false;
+			/**
+			* Buffer for packets received before the CONNECT packet
+			*/
+			this.receiveBuffer = [];
+			/**
+			* Buffer for packets that will be sent once the socket is connected
+			*/
+			this.sendBuffer = [];
+			/**
+			* The queue of packets to be sent with retry in case of failure.
+			*
+			* Packets are sent one by one, each waiting for the server acknowledgement, in order to guarantee the delivery order.
+			* @private
+			*/
+			this._queue = [];
+			/**
+			* A sequence to generate the ID of the {@link QueuedPacket}.
+			* @private
+			*/
+			this._queueSeq = 0;
+			this.ids = 0;
+			/**
+			* A map containing acknowledgement handlers.
+			*
+			* The `withError` attribute is used to differentiate handlers that accept an error as first argument:
+			*
+			* - `socket.emit("test", (err, value) => { ... })` with `ackTimeout` option
+			* - `socket.timeout(5000).emit("test", (err, value) => { ... })`
+			* - `const value = await socket.emitWithAck("test")`
+			*
+			* From those that don't:
+			*
+			* - `socket.emit("test", (value) => { ... });`
+			*
+			* In the first case, the handlers will be called with an error when:
+			*
+			* - the timeout is reached
+			* - the socket gets disconnected
+			*
+			* In the second case, the handlers will be simply discarded upon disconnection, since the client will never receive
+			* an acknowledgement from the server.
+			*
+			* @private
+			*/
+			this.acks = {};
+			this.flags = {};
+			this.io = io;
+			this.nsp = nsp;
+			if (opts && opts.auth) this.auth = opts.auth;
+			this._opts = Object.assign({}, opts);
+			if (this.io._autoConnect) this.open();
+		}
+		/**
+		* Whether the socket is currently disconnected
+		*
+		* @example
+		* const socket = io();
+		*
+		* socket.on("connect", () => {
+		*   console.log(socket.disconnected); // false
+		* });
+		*
+		* socket.on("disconnect", () => {
+		*   console.log(socket.disconnected); // true
+		* });
+		*/
+		get disconnected() {
+			return !this.connected;
+		}
+		/**
+		* Subscribe to open, close and packet events
+		*
+		* @private
+		*/
+		subEvents() {
+			if (this.subs) return;
+			const io = this.io;
+			this.subs = [
+				on(io, "open", this.onopen.bind(this)),
+				on(io, "packet", this.onpacket.bind(this)),
+				on(io, "error", this.onerror.bind(this)),
+				on(io, "close", this.onclose.bind(this))
+			];
+		}
+		/**
+		* Whether the Socket will try to reconnect when its Manager connects or reconnects.
+		*
+		* @example
+		* const socket = io();
+		*
+		* console.log(socket.active); // true
+		*
+		* socket.on("disconnect", (reason) => {
+		*   if (reason === "io server disconnect") {
+		*     // the disconnection was initiated by the server, you need to manually reconnect
+		*     console.log(socket.active); // false
+		*   }
+		*   // else the socket will automatically try to reconnect
+		*   console.log(socket.active); // true
+		* });
+		*/
+		get active() {
+			return !!this.subs;
+		}
+		/**
+		* "Opens" the socket.
+		*
+		* @example
+		* const socket = io({
+		*   autoConnect: false
+		* });
+		*
+		* socket.connect();
+		*/
+		connect() {
+			if (this.connected) return this;
+			this.subEvents();
+			if (!this.io["_reconnecting"]) this.io.open();
+			if ("open" === this.io._readyState) this.onopen();
+			return this;
+		}
+		/**
+		* Alias for {@link connect()}.
+		*/
+		open() {
+			return this.connect();
+		}
+		/**
+		* Sends a `message` event.
+		*
+		* This method mimics the WebSocket.send() method.
+		*
+		* @see https://developer.mozilla.org/en-US/docs/Web/API/WebSocket/send
+		*
+		* @example
+		* socket.send("hello");
+		*
+		* // this is equivalent to
+		* socket.emit("message", "hello");
+		*
+		* @return self
+		*/
+		send(...args) {
+			args.unshift("message");
+			this.emit.apply(this, args);
+			return this;
+		}
+		/**
+		* Override `emit`.
+		* If the event is in `events`, it's emitted normally.
+		*
+		* @example
+		* socket.emit("hello", "world");
+		*
+		* // all serializable datastructures are supported (no need to call JSON.stringify)
+		* socket.emit("hello", 1, "2", { 3: ["4"], 5: Uint8Array.from([6]) });
+		*
+		* // with an acknowledgement from the server
+		* socket.emit("hello", "world", (val) => {
+		*   // ...
+		* });
+		*
+		* @return self
+		*/
+		emit(ev, ...args) {
+			var _a, _b, _c;
+			if (RESERVED_EVENTS.hasOwnProperty(ev)) throw new Error("\"" + ev.toString() + "\" is a reserved event name");
+			args.unshift(ev);
+			if (this._opts.retries && !this.flags.fromQueue && !this.flags.volatile) {
+				this._addToQueue(args);
+				return this;
+			}
+			const packet = {
+				type: PacketType.EVENT,
+				data: args
+			};
+			packet.options = {};
+			packet.options.compress = this.flags.compress !== false;
+			if ("function" === typeof args[args.length - 1]) {
+				const id = this.ids++;
+				const ack = args.pop();
+				this._registerAckCallback(id, ack);
+				packet.id = id;
+			}
+			const isTransportWritable = (_b = (_a = this.io.engine) === null || _a === void 0 ? void 0 : _a.transport) === null || _b === void 0 ? void 0 : _b.writable;
+			const isConnected = this.connected && !((_c = this.io.engine) === null || _c === void 0 ? void 0 : _c._hasPingExpired());
+			if (this.flags.volatile && !isTransportWritable) {} else if (isConnected) {
+				this.notifyOutgoingListeners(packet);
+				this.packet(packet);
+			} else this.sendBuffer.push(packet);
+			this.flags = {};
+			return this;
+		}
+		/**
+		* @private
+		*/
+		_registerAckCallback(id, ack) {
+			var _a;
+			const timeout = (_a = this.flags.timeout) !== null && _a !== void 0 ? _a : this._opts.ackTimeout;
+			if (timeout === void 0) {
+				this.acks[id] = ack;
+				return;
+			}
+			const timer = this.io.setTimeoutFn(() => {
+				delete this.acks[id];
+				for (let i = 0; i < this.sendBuffer.length; i++) if (this.sendBuffer[i].id === id) this.sendBuffer.splice(i, 1);
+				ack.call(this, /* @__PURE__ */ new Error("operation has timed out"));
+			}, timeout);
+			const fn = (...args) => {
+				this.io.clearTimeoutFn(timer);
+				ack.apply(this, args);
+			};
+			fn.withError = true;
+			this.acks[id] = fn;
+		}
+		/**
+		* Emits an event and waits for an acknowledgement
+		*
+		* @example
+		* // without timeout
+		* const response = await socket.emitWithAck("hello", "world");
+		*
+		* // with a specific timeout
+		* try {
+		*   const response = await socket.timeout(1000).emitWithAck("hello", "world");
+		* } catch (err) {
+		*   // the server did not acknowledge the event in the given delay
+		* }
+		*
+		* @return a Promise that will be fulfilled when the server acknowledges the event
+		*/
+		emitWithAck(ev, ...args) {
+			return new Promise((resolve, reject) => {
+				const fn = (arg1, arg2) => {
+					return arg1 ? reject(arg1) : resolve(arg2);
+				};
+				fn.withError = true;
+				args.push(fn);
+				this.emit(ev, ...args);
+			});
+		}
+		/**
+		* Add the packet to the queue.
+		* @param args
+		* @private
+		*/
+		_addToQueue(args) {
+			let ack;
+			if (typeof args[args.length - 1] === "function") ack = args.pop();
+			const packet = {
+				id: this._queueSeq++,
+				tryCount: 0,
+				pending: false,
+				args,
+				flags: Object.assign({ fromQueue: true }, this.flags)
+			};
+			args.push((err, ...responseArgs) => {
+				if (packet !== this._queue[0]) {}
+				if (err !== null) {
+					if (packet.tryCount > this._opts.retries) {
+						this._queue.shift();
+						if (ack) ack(err);
+					}
+				} else {
+					this._queue.shift();
+					if (ack) ack(null, ...responseArgs);
+				}
+				packet.pending = false;
+				return this._drainQueue();
+			});
+			this._queue.push(packet);
+			this._drainQueue();
+		}
+		/**
+		* Send the first packet of the queue, and wait for an acknowledgement from the server.
+		* @param force - whether to resend a packet that has not been acknowledged yet
+		*
+		* @private
+		*/
+		_drainQueue(force = false) {
+			if (!this.connected || this._queue.length === 0) return;
+			const packet = this._queue[0];
+			if (packet.pending && !force) return;
+			packet.pending = true;
+			packet.tryCount++;
+			this.flags = packet.flags;
+			this.emit.apply(this, packet.args);
+		}
+		/**
+		* Sends a packet.
+		*
+		* @param packet
+		* @private
+		*/
+		packet(packet) {
+			packet.nsp = this.nsp;
+			this.io._packet(packet);
+		}
+		/**
+		* Called upon engine `open`.
+		*
+		* @private
+		*/
+		onopen() {
+			if (typeof this.auth == "function") this.auth((data) => {
+				this._sendConnectPacket(data);
+			});
+			else this._sendConnectPacket(this.auth);
+		}
+		/**
+		* Sends a CONNECT packet to initiate the Socket.IO session.
+		*
+		* @param data
+		* @private
+		*/
+		_sendConnectPacket(data) {
+			this.packet({
+				type: PacketType.CONNECT,
+				data: this._pid ? Object.assign({
+					pid: this._pid,
+					offset: this._lastOffset
+				}, data) : data
+			});
+		}
+		/**
+		* Called upon engine or manager `error`.
+		*
+		* @param err
+		* @private
+		*/
+		onerror(err) {
+			if (!this.connected) this.emitReserved("connect_error", err);
+		}
+		/**
+		* Called upon engine `close`.
+		*
+		* @param reason
+		* @param description
+		* @private
+		*/
+		onclose(reason, description) {
+			this.connected = false;
+			delete this.id;
+			this.emitReserved("disconnect", reason, description);
+			this._clearAcks();
+		}
+		/**
+		* Clears the acknowledgement handlers upon disconnection, since the client will never receive an acknowledgement from
+		* the server.
+		*
+		* @private
+		*/
+		_clearAcks() {
+			Object.keys(this.acks).forEach((id) => {
+				if (!this.sendBuffer.some((packet) => String(packet.id) === id)) {
+					const ack = this.acks[id];
+					delete this.acks[id];
+					if (ack.withError) ack.call(this, /* @__PURE__ */ new Error("socket has been disconnected"));
+				}
+			});
+		}
+		/**
+		* Called with socket packet.
+		*
+		* @param packet
+		* @private
+		*/
+		onpacket(packet) {
+			if (!(packet.nsp === this.nsp)) return;
+			switch (packet.type) {
+				case PacketType.CONNECT:
+					if (packet.data && packet.data.sid) this.onconnect(packet.data.sid, packet.data.pid);
+					else this.emitReserved("connect_error", /* @__PURE__ */ new Error("It seems you are trying to reach a Socket.IO server in v2.x with a v3.x client, but they are not compatible (more information here: https://socket.io/docs/v3/migrating-from-2-x-to-3-0/)"));
+					break;
+				case PacketType.EVENT:
+				case PacketType.BINARY_EVENT:
+					this.onevent(packet);
+					break;
+				case PacketType.ACK:
+				case PacketType.BINARY_ACK:
+					this.onack(packet);
+					break;
+				case PacketType.DISCONNECT:
+					this.ondisconnect();
+					break;
+				case PacketType.CONNECT_ERROR:
+					this.destroy();
+					const err = new Error(packet.data.message);
+					err.data = packet.data.data;
+					this.emitReserved("connect_error", err);
+					break;
+			}
+		}
+		/**
+		* Called upon a server event.
+		*
+		* @param packet
+		* @private
+		*/
+		onevent(packet) {
+			const args = packet.data || [];
+			if (null != packet.id) args.push(this.ack(packet.id));
+			if (this.connected) this.emitEvent(args);
+			else this.receiveBuffer.push(Object.freeze(args));
+		}
+		emitEvent(args) {
+			if (this._anyListeners && this._anyListeners.length) {
+				const listeners = this._anyListeners.slice();
+				for (const listener of listeners) listener.apply(this, args);
+			}
+			super.emit.apply(this, args);
+			if (this._pid && args.length && typeof args[args.length - 1] === "string") this._lastOffset = args[args.length - 1];
+		}
+		/**
+		* Produces an ack callback to emit with an event.
+		*
+		* @private
+		*/
+		ack(id) {
+			const self = this;
+			let sent = false;
+			return function(...args) {
+				if (sent) return;
+				sent = true;
+				self.packet({
+					type: PacketType.ACK,
+					id,
+					data: args
+				});
+			};
+		}
+		/**
+		* Called upon a server acknowledgement.
+		*
+		* @param packet
+		* @private
+		*/
+		onack(packet) {
+			const ack = this.acks[packet.id];
+			if (typeof ack !== "function") return;
+			delete this.acks[packet.id];
+			if (ack.withError) packet.data.unshift(null);
+			ack.apply(this, packet.data);
+		}
+		/**
+		* Called upon server connect.
+		*
+		* @private
+		*/
+		onconnect(id, pid) {
+			this.id = id;
+			this.recovered = pid && this._pid === pid;
+			this._pid = pid;
+			this.connected = true;
+			this.emitBuffered();
+			this._drainQueue(true);
+			this.emitReserved("connect");
+		}
+		/**
+		* Emit buffered events (received and emitted).
+		*
+		* @private
+		*/
+		emitBuffered() {
+			this.receiveBuffer.forEach((args) => this.emitEvent(args));
+			this.receiveBuffer = [];
+			this.sendBuffer.forEach((packet) => {
+				this.notifyOutgoingListeners(packet);
+				this.packet(packet);
+			});
+			this.sendBuffer = [];
+		}
+		/**
+		* Called upon server disconnect.
+		*
+		* @private
+		*/
+		ondisconnect() {
+			this.destroy();
+			this.onclose("io server disconnect");
+		}
+		/**
+		* Called upon forced client/server side disconnections,
+		* this method ensures the manager stops tracking us and
+		* that reconnections don't get triggered for this.
+		*
+		* @private
+		*/
+		destroy() {
+			if (this.subs) {
+				this.subs.forEach((subDestroy) => subDestroy());
+				this.subs = void 0;
+			}
+			this.io["_destroy"](this);
+		}
+		/**
+		* Disconnects the socket manually. In that case, the socket will not try to reconnect.
+		*
+		* If this is the last active Socket instance of the {@link Manager}, the low-level connection will be closed.
+		*
+		* @example
+		* const socket = io();
+		*
+		* socket.on("disconnect", (reason) => {
+		*   // console.log(reason); prints "io client disconnect"
+		* });
+		*
+		* socket.disconnect();
+		*
+		* @return self
+		*/
+		disconnect() {
+			if (this.connected) this.packet({ type: PacketType.DISCONNECT });
+			this.destroy();
+			if (this.connected) this.onclose("io client disconnect");
+			return this;
+		}
+		/**
+		* Alias for {@link disconnect()}.
+		*
+		* @return self
+		*/
+		close() {
+			return this.disconnect();
+		}
+		/**
+		* Sets the compress flag.
+		*
+		* @example
+		* socket.compress(false).emit("hello");
+		*
+		* @param compress - if `true`, compresses the sending data
+		* @return self
+		*/
+		compress(compress) {
+			this.flags.compress = compress;
+			return this;
+		}
+		/**
+		* Sets a modifier for a subsequent event emission that the event message will be dropped when this socket is not
+		* ready to send messages.
+		*
+		* @example
+		* socket.volatile.emit("hello"); // the server may or may not receive it
+		*
+		* @returns self
+		*/
+		get volatile() {
+			this.flags.volatile = true;
+			return this;
+		}
+		/**
+		* Sets a modifier for a subsequent event emission that the callback will be called with an error when the
+		* given number of milliseconds have elapsed without an acknowledgement from the server:
+		*
+		* @example
+		* socket.timeout(5000).emit("my-event", (err) => {
+		*   if (err) {
+		*     // the server did not acknowledge the event in the given delay
+		*   }
+		* });
+		*
+		* @returns self
+		*/
+		timeout(timeout) {
+			this.flags.timeout = timeout;
+			return this;
+		}
+		/**
+		* Adds a listener that will be fired when any event is emitted. The event name is passed as the first argument to the
+		* callback.
+		*
+		* @example
+		* socket.onAny((event, ...args) => {
+		*   console.log(`got ${event}`);
+		* });
+		*
+		* @param listener
+		*/
+		onAny(listener) {
+			this._anyListeners = this._anyListeners || [];
+			this._anyListeners.push(listener);
+			return this;
+		}
+		/**
+		* Adds a listener that will be fired when any event is emitted. The event name is passed as the first argument to the
+		* callback. The listener is added to the beginning of the listeners array.
+		*
+		* @example
+		* socket.prependAny((event, ...args) => {
+		*   console.log(`got event ${event}`);
+		* });
+		*
+		* @param listener
+		*/
+		prependAny(listener) {
+			this._anyListeners = this._anyListeners || [];
+			this._anyListeners.unshift(listener);
+			return this;
+		}
+		/**
+		* Removes the listener that will be fired when any event is emitted.
+		*
+		* @example
+		* const catchAllListener = (event, ...args) => {
+		*   console.log(`got event ${event}`);
+		* }
+		*
+		* socket.onAny(catchAllListener);
+		*
+		* // remove a specific listener
+		* socket.offAny(catchAllListener);
+		*
+		* // or remove all listeners
+		* socket.offAny();
+		*
+		* @param listener
+		*/
+		offAny(listener) {
+			if (!this._anyListeners) return this;
+			if (listener) {
+				const listeners = this._anyListeners;
+				for (let i = 0; i < listeners.length; i++) if (listener === listeners[i]) {
+					listeners.splice(i, 1);
+					return this;
+				}
+			} else this._anyListeners = [];
+			return this;
+		}
+		/**
+		* Returns an array of listeners that are listening for any event that is specified. This array can be manipulated,
+		* e.g. to remove listeners.
+		*/
+		listenersAny() {
+			return this._anyListeners || [];
+		}
+		/**
+		* Adds a listener that will be fired when any event is emitted. The event name is passed as the first argument to the
+		* callback.
+		*
+		* Note: acknowledgements sent to the server are not included.
+		*
+		* @example
+		* socket.onAnyOutgoing((event, ...args) => {
+		*   console.log(`sent event ${event}`);
+		* });
+		*
+		* @param listener
+		*/
+		onAnyOutgoing(listener) {
+			this._anyOutgoingListeners = this._anyOutgoingListeners || [];
+			this._anyOutgoingListeners.push(listener);
+			return this;
+		}
+		/**
+		* Adds a listener that will be fired when any event is emitted. The event name is passed as the first argument to the
+		* callback. The listener is added to the beginning of the listeners array.
+		*
+		* Note: acknowledgements sent to the server are not included.
+		*
+		* @example
+		* socket.prependAnyOutgoing((event, ...args) => {
+		*   console.log(`sent event ${event}`);
+		* });
+		*
+		* @param listener
+		*/
+		prependAnyOutgoing(listener) {
+			this._anyOutgoingListeners = this._anyOutgoingListeners || [];
+			this._anyOutgoingListeners.unshift(listener);
+			return this;
+		}
+		/**
+		* Removes the listener that will be fired when any event is emitted.
+		*
+		* @example
+		* const catchAllListener = (event, ...args) => {
+		*   console.log(`sent event ${event}`);
+		* }
+		*
+		* socket.onAnyOutgoing(catchAllListener);
+		*
+		* // remove a specific listener
+		* socket.offAnyOutgoing(catchAllListener);
+		*
+		* // or remove all listeners
+		* socket.offAnyOutgoing();
+		*
+		* @param [listener] - the catch-all listener (optional)
+		*/
+		offAnyOutgoing(listener) {
+			if (!this._anyOutgoingListeners) return this;
+			if (listener) {
+				const listeners = this._anyOutgoingListeners;
+				for (let i = 0; i < listeners.length; i++) if (listener === listeners[i]) {
+					listeners.splice(i, 1);
+					return this;
+				}
+			} else this._anyOutgoingListeners = [];
+			return this;
+		}
+		/**
+		* Returns an array of listeners that are listening for any event that is specified. This array can be manipulated,
+		* e.g. to remove listeners.
+		*/
+		listenersAnyOutgoing() {
+			return this._anyOutgoingListeners || [];
+		}
+		/**
+		* Notify the listeners for each packet sent
+		*
+		* @param packet
+		*
+		* @private
+		*/
+		notifyOutgoingListeners(packet) {
+			if (this._anyOutgoingListeners && this._anyOutgoingListeners.length) {
+				const listeners = this._anyOutgoingListeners.slice();
+				for (const listener of listeners) listener.apply(this, packet.data);
+			}
+		}
+	};
+	//#endregion
+	//#region node_modules/socket.io-client/build/esm/contrib/backo2.js
+	/**
+	* Initialize backoff timer with `opts`.
+	*
+	* - `min` initial timeout in milliseconds [100]
+	* - `max` max timeout [10000]
+	* - `jitter` [0]
+	* - `factor` [2]
+	*
+	* @param {Object} opts
+	* @api public
+	*/
+	function Backoff(opts) {
+		opts = opts || {};
+		this.ms = opts.min || 100;
+		this.max = opts.max || 1e4;
+		this.factor = opts.factor || 2;
+		this.jitter = opts.jitter > 0 && opts.jitter <= 1 ? opts.jitter : 0;
+		this.attempts = 0;
+	}
+	/**
+	* Return the backoff duration.
+	*
+	* @return {Number}
+	* @api public
+	*/
+	Backoff.prototype.duration = function() {
+		var ms = this.ms * Math.pow(this.factor, this.attempts++);
+		if (this.jitter) {
+			var rand = Math.random();
+			var deviation = Math.floor(rand * this.jitter * ms);
+			ms = (Math.floor(rand * 10) & 1) == 0 ? ms - deviation : ms + deviation;
+		}
+		return Math.min(ms, this.max) | 0;
+	};
+	/**
+	* Reset the number of attempts.
+	*
+	* @api public
+	*/
+	Backoff.prototype.reset = function() {
+		this.attempts = 0;
+	};
+	/**
+	* Set the minimum duration
+	*
+	* @api public
+	*/
+	Backoff.prototype.setMin = function(min) {
+		this.ms = min;
+	};
+	/**
+	* Set the maximum duration
+	*
+	* @api public
+	*/
+	Backoff.prototype.setMax = function(max) {
+		this.max = max;
+	};
+	/**
+	* Set the jitter
+	*
+	* @api public
+	*/
+	Backoff.prototype.setJitter = function(jitter) {
+		this.jitter = jitter;
+	};
+	//#endregion
+	//#region node_modules/socket.io-client/build/esm/manager.js
+	var Manager = class extends Emitter {
+		constructor(uri, opts) {
+			var _a;
+			super();
+			this.nsps = {};
+			this.subs = [];
+			if (uri && "object" === typeof uri) {
+				opts = uri;
+				uri = void 0;
+			}
+			opts = opts || {};
+			opts.path = opts.path || "/socket.io";
+			this.opts = opts;
+			installTimerFunctions(this, opts);
+			this.reconnection(opts.reconnection !== false);
+			this.reconnectionAttempts(opts.reconnectionAttempts || Infinity);
+			this.reconnectionDelay(opts.reconnectionDelay || 1e3);
+			this.reconnectionDelayMax(opts.reconnectionDelayMax || 5e3);
+			this.randomizationFactor((_a = opts.randomizationFactor) !== null && _a !== void 0 ? _a : .5);
+			this.backoff = new Backoff({
+				min: this.reconnectionDelay(),
+				max: this.reconnectionDelayMax(),
+				jitter: this.randomizationFactor()
+			});
+			this.timeout(null == opts.timeout ? 2e4 : opts.timeout);
+			this._readyState = "closed";
+			this.uri = uri;
+			const _parser = opts.parser || esm_exports;
+			this.encoder = new _parser.Encoder();
+			this.decoder = new _parser.Decoder();
+			this._autoConnect = opts.autoConnect !== false;
+			if (this._autoConnect) this.open();
+		}
+		reconnection(v) {
+			if (!arguments.length) return this._reconnection;
+			this._reconnection = !!v;
+			if (!v) this.skipReconnect = true;
+			return this;
+		}
+		reconnectionAttempts(v) {
+			if (v === void 0) return this._reconnectionAttempts;
+			this._reconnectionAttempts = v;
+			return this;
+		}
+		reconnectionDelay(v) {
+			var _a;
+			if (v === void 0) return this._reconnectionDelay;
+			this._reconnectionDelay = v;
+			(_a = this.backoff) === null || _a === void 0 || _a.setMin(v);
+			return this;
+		}
+		randomizationFactor(v) {
+			var _a;
+			if (v === void 0) return this._randomizationFactor;
+			this._randomizationFactor = v;
+			(_a = this.backoff) === null || _a === void 0 || _a.setJitter(v);
+			return this;
+		}
+		reconnectionDelayMax(v) {
+			var _a;
+			if (v === void 0) return this._reconnectionDelayMax;
+			this._reconnectionDelayMax = v;
+			(_a = this.backoff) === null || _a === void 0 || _a.setMax(v);
+			return this;
+		}
+		timeout(v) {
+			if (!arguments.length) return this._timeout;
+			this._timeout = v;
+			return this;
+		}
+		/**
+		* Starts trying to reconnect if reconnection is enabled and we have not
+		* started reconnecting yet
+		*
+		* @private
+		*/
+		maybeReconnectOnOpen() {
+			if (!this._reconnecting && this._reconnection && this.backoff.attempts === 0) this.reconnect();
+		}
+		/**
+		* Sets the current transport `socket`.
+		*
+		* @param {Function} fn - optional, callback
+		* @return self
+		* @public
+		*/
+		open(fn) {
+			if (~this._readyState.indexOf("open")) return this;
+			this.engine = new Socket$1(this.uri, this.opts);
+			const socket = this.engine;
+			const self = this;
+			this._readyState = "opening";
+			this.skipReconnect = false;
+			const openSubDestroy = on(socket, "open", function() {
+				self.onopen();
+				fn && fn();
+			});
+			const onError = (err) => {
+				this.cleanup();
+				this._readyState = "closed";
+				this.emitReserved("error", err);
+				if (fn) fn(err);
+				else this.maybeReconnectOnOpen();
+			};
+			const errorSub = on(socket, "error", onError);
+			if (false !== this._timeout) {
+				const timeout = this._timeout;
+				const timer = this.setTimeoutFn(() => {
+					openSubDestroy();
+					onError(/* @__PURE__ */ new Error("timeout"));
+					socket.close();
+				}, timeout);
+				if (this.opts.autoUnref) timer.unref();
+				this.subs.push(() => {
+					this.clearTimeoutFn(timer);
+				});
+			}
+			this.subs.push(openSubDestroy);
+			this.subs.push(errorSub);
+			return this;
+		}
+		/**
+		* Alias for open()
+		*
+		* @return self
+		* @public
+		*/
+		connect(fn) {
+			return this.open(fn);
+		}
+		/**
+		* Called upon transport open.
+		*
+		* @private
+		*/
+		onopen() {
+			this.cleanup();
+			this._readyState = "open";
+			this.emitReserved("open");
+			const socket = this.engine;
+			this.subs.push(on(socket, "ping", this.onping.bind(this)), on(socket, "data", this.ondata.bind(this)), on(socket, "error", this.onerror.bind(this)), on(socket, "close", this.onclose.bind(this)), on(this.decoder, "decoded", this.ondecoded.bind(this)));
+		}
+		/**
+		* Called upon a ping.
+		*
+		* @private
+		*/
+		onping() {
+			this.emitReserved("ping");
+		}
+		/**
+		* Called with data.
+		*
+		* @private
+		*/
+		ondata(data) {
+			try {
+				this.decoder.add(data);
+			} catch (e) {
+				this.onclose("parse error", e);
+			}
+		}
+		/**
+		* Called when parser fully decodes a packet.
+		*
+		* @private
+		*/
+		ondecoded(packet) {
+			nextTick(() => {
+				this.emitReserved("packet", packet);
+			}, this.setTimeoutFn);
+		}
+		/**
+		* Called upon socket error.
+		*
+		* @private
+		*/
+		onerror(err) {
+			this.emitReserved("error", err);
+		}
+		/**
+		* Creates a new socket for the given `nsp`.
+		*
+		* @return {Socket}
+		* @public
+		*/
+		socket(nsp, opts) {
+			let socket = this.nsps[nsp];
+			if (!socket) {
+				socket = new Socket(this, nsp, opts);
+				this.nsps[nsp] = socket;
+			} else if (this._autoConnect && !socket.active) socket.connect();
+			return socket;
+		}
+		/**
+		* Called upon a socket close.
+		*
+		* @param socket
+		* @private
+		*/
+		_destroy(socket) {
+			const nsps = Object.keys(this.nsps);
+			for (const nsp of nsps) if (this.nsps[nsp].active) return;
+			this._close();
+		}
+		/**
+		* Writes a packet.
+		*
+		* @param packet
+		* @private
+		*/
+		_packet(packet) {
+			const encodedPackets = this.encoder.encode(packet);
+			for (let i = 0; i < encodedPackets.length; i++) this.engine.write(encodedPackets[i], packet.options);
+		}
+		/**
+		* Clean up transport subscriptions and packet buffer.
+		*
+		* @private
+		*/
+		cleanup() {
+			this.subs.forEach((subDestroy) => subDestroy());
+			this.subs.length = 0;
+			this.decoder.destroy();
+		}
+		/**
+		* Close the current socket.
+		*
+		* @private
+		*/
+		_close() {
+			this.skipReconnect = true;
+			this._reconnecting = false;
+			this.onclose("forced close");
+		}
+		/**
+		* Alias for close()
+		*
+		* @private
+		*/
+		disconnect() {
+			return this._close();
+		}
+		/**
+		* Called when:
+		*
+		* - the low-level engine is closed
+		* - the parser encountered a badly formatted packet
+		* - all sockets are disconnected
+		*
+		* @private
+		*/
+		onclose(reason, description) {
+			var _a;
+			this.cleanup();
+			(_a = this.engine) === null || _a === void 0 || _a.close();
+			this.backoff.reset();
+			this._readyState = "closed";
+			this.emitReserved("close", reason, description);
+			if (this._reconnection && !this.skipReconnect) this.reconnect();
+		}
+		/**
+		* Attempt a reconnection.
+		*
+		* @private
+		*/
+		reconnect() {
+			if (this._reconnecting || this.skipReconnect) return this;
+			const self = this;
+			if (this.backoff.attempts >= this._reconnectionAttempts) {
+				this.backoff.reset();
+				this.emitReserved("reconnect_failed");
+				this._reconnecting = false;
+			} else {
+				const delay = this.backoff.duration();
+				this._reconnecting = true;
+				const timer = this.setTimeoutFn(() => {
+					if (self.skipReconnect) return;
+					this.emitReserved("reconnect_attempt", self.backoff.attempts);
+					if (self.skipReconnect) return;
+					self.open((err) => {
+						if (err) {
+							self._reconnecting = false;
+							self.reconnect();
+							this.emitReserved("reconnect_error", err);
+						} else self.onreconnect();
+					});
+				}, delay);
+				if (this.opts.autoUnref) timer.unref();
+				this.subs.push(() => {
+					this.clearTimeoutFn(timer);
+				});
+			}
+		}
+		/**
+		* Called upon successful reconnect.
+		*
+		* @private
+		*/
+		onreconnect() {
+			const attempt = this.backoff.attempts;
+			this._reconnecting = false;
+			this.backoff.reset();
+			this.emitReserved("reconnect", attempt);
+		}
+	};
+	//#endregion
+	//#region node_modules/socket.io-client/build/esm/index.js
+	/**
+	* Managers cache.
+	*/
+	var cache = {};
+	function lookup(uri, opts) {
+		if (typeof uri === "object") {
+			opts = uri;
+			uri = void 0;
+		}
+		opts = opts || {};
+		const parsed = url(uri, opts.path || "/socket.io");
+		const source = parsed.source;
+		const id = parsed.id;
+		const path = parsed.path;
+		const sameNamespace = cache[id] && path in cache[id]["nsps"];
+		const newConnection = opts.forceNew || opts["force new connection"] || false === opts.multiplex || sameNamespace;
+		let io;
+		if (newConnection) io = new Manager(source, opts);
+		else {
+			if (!cache[id]) cache[id] = new Manager(source, opts);
+			io = cache[id];
+		}
+		if (parsed.query && !opts.query) opts.query = parsed.queryKey;
+		return io.socket(parsed.path, opts);
+	}
+	Object.assign(lookup, {
+		Manager,
+		Socket,
+		io: lookup,
+		connect: lookup
+	});
+	//#endregion
 	//#region src/SocketClient.svelte
-	var root$2 = with_script(/* @__PURE__ */ from_html(`<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.1.2/socket.io.js" integrity="sha512-iZIBSs+gDyTH0ZhUem9eQ1t4DcEn2B9lHxfRMeGQhyNdSUz+rb+5A3ummX6DQTOIs1XK0gOteOg/LPtSo9VJ+w==" crossorigin="anonymous" referrerpolicy="no-referrer"><\/script><!>`, 1));
 	function SocketClient($$anchor, $$props) {
 		push($$props, true);
 		let connected = prop($$props, "connected", 15, false);
-		let socket = {};
-		const init = () => {
-			const sock = io({ transports: ["websocket"] }).connect();
-			socket = sock;
+		user_effect(() => {
+			const socket = lookup({ transports: ["websocket"] });
 			connected(socket.connected);
-			sock.on("connect", () => {
+			socket.on("connect", () => {
 				connected(socket.connected);
 			});
-			sock.on("disconnect", () => {
+			socket.on("disconnect", () => {
 				connected(socket.connected);
 			});
-			$$props.socketLoad(sock);
-		};
-		head("1aupsap", ($$anchor) => {
-			var fragment = root$2();
-			var script = first_child(fragment);
-			sibling(script);
-			event("load", script, init);
-			replay_events(script);
-			append($$anchor, fragment);
+			$$props.socketLoad(socket);
+			return () => socket.close();
 		});
 		pop();
 	}
@@ -4631,41 +7841,1691 @@ createHTML: (html) => {
 		pop();
 	}
 	//#endregion
+	//#region node_modules/ua-parser-js/src/main/ua-parser.mjs
+	var LIBVERSION = "2.0.10";
+	var UA_MAX_LENGTH = 500;
+	var USER_AGENT = "user-agent";
+	var EMPTY = "";
+	var UNKNOWN = "?";
+	var TYPEOF = {
+		FUNCTION: "function",
+		OBJECT: "object",
+		STRING: "string",
+		UNDEFINED: "undefined"
+	};
+	var BROWSER = "browser";
+	var CPU = "cpu";
+	var DEVICE = "device";
+	var ENGINE = "engine";
+	var OS = "os";
+	var RESULT = "result";
+	var NAME = "name";
+	var TYPE = "type";
+	var VENDOR = "vendor";
+	var VERSION = "version";
+	var ARCHITECTURE = "architecture";
+	var MAJOR = "major";
+	var MODEL = "model";
+	var CONSOLE = "console";
+	var MOBILE = "mobile";
+	var TABLET = "tablet";
+	var SMARTTV = "smarttv";
+	var WEARABLE = "wearable";
+	var XR = "xr";
+	var EMBEDDED = "embedded";
+	var FETCHER = "fetcher";
+	var INAPP = "inapp";
+	var BRANDS = "brands";
+	var FORMFACTORS = "formFactors";
+	var FULLVERLIST = "fullVersionList";
+	var PLATFORM = "platform";
+	var PLATFORMVER = "platformVersion";
+	var BITNESS = "bitness";
+	var CH = "sec-ch-ua";
+	var CH_FULL_VER_LIST = CH + "-full-version-list";
+	var CH_ARCH = CH + "-arch";
+	var CH_BITNESS = CH + "-" + BITNESS;
+	var CH_FORM_FACTORS = CH + "-form-factors";
+	var CH_MOBILE = CH + "-" + MOBILE;
+	var CH_MODEL = CH + "-" + MODEL;
+	var CH_PLATFORM = CH + "-" + PLATFORM;
+	var CH_PLATFORM_VER = CH_PLATFORM + "-version";
+	var CH_ALL_VALUES = [
+		BRANDS,
+		FULLVERLIST,
+		MOBILE,
+		MODEL,
+		PLATFORM,
+		PLATFORMVER,
+		ARCHITECTURE,
+		FORMFACTORS,
+		BITNESS
+	];
+	var AMAZON = "Amazon";
+	var APPLE = "Apple";
+	var ASUS = "ASUS";
+	var BLACKBERRY = "BlackBerry";
+	var GOOGLE = "Google";
+	var HUAWEI = "Huawei";
+	var LENOVO = "Lenovo";
+	var HONOR = "Honor";
+	var LG = "LG";
+	var MICROSOFT = "Microsoft";
+	var MOTOROLA = "Motorola";
+	var NVIDIA = "Nvidia";
+	var ONEPLUS = "OnePlus";
+	var OPPO = "OPPO";
+	var SAMSUNG = "Samsung";
+	var SHARP = "Sharp";
+	var SONY = "Sony";
+	var XIAOMI = "Xiaomi";
+	var ZEBRA = "Zebra";
+	var CHROME = "Chrome";
+	var CHROMIUM = "Chromium";
+	var CHROMECAST = "Chromecast";
+	var EDGE = "Edge";
+	var FIREFOX = "Firefox";
+	var OPERA = "Opera";
+	var FACEBOOK = "Facebook";
+	var SOGOU = "Sogou";
+	var PREFIX_MOBILE = "Mobile ";
+	var SUFFIX_BROWSER = " Browser";
+	var WINDOWS = "Windows";
+	var NAVIGATOR = typeof window !== TYPEOF.UNDEFINED && window.navigator ? window.navigator : void 0;
+	var NAVIGATOR_UADATA = NAVIGATOR && NAVIGATOR.userAgentData ? NAVIGATOR.userAgentData : void 0;
+	var extend = function(defaultRgx, extensions) {
+		var mergedRgx = {};
+		var extraRgx = extensions;
+		if (!isExtensions(extensions)) {
+			extraRgx = {};
+			for (var i in extensions) for (var j in extensions[i]) extraRgx[j] = extensions[i][j].concat(extraRgx[j] ? extraRgx[j] : []);
+		}
+		for (var k in defaultRgx) mergedRgx[k] = extraRgx[k] && extraRgx[k].length % 2 === 0 ? extraRgx[k].concat(defaultRgx[k]) : defaultRgx[k];
+		return mergedRgx;
+	};
+	var enumerize = function(arr) {
+		var enums = {};
+		for (var i = 0; i < arr.length; i++) enums[arr[i].toUpperCase()] = arr[i];
+		return enums;
+	};
+	var has = function(str1, str2) {
+		if (typeof str1 === TYPEOF.OBJECT && str1.length > 0) {
+			for (var i in str1) if (lowerize(str2) == lowerize(str1[i])) return true;
+			return false;
+		}
+		return isString(str1) ? lowerize(str2) == lowerize(str1) : false;
+	};
+	var isExtensions = function(obj, deep) {
+		for (var prop in obj) return /^(browser|cpu|device|engine|os)$/.test(prop) || (deep ? isExtensions(obj[prop]) : false);
+	};
+	var isString = function(val) {
+		return typeof val === TYPEOF.STRING;
+	};
+	var itemListToArray = function(header) {
+		if (!header) return void 0;
+		var arr = [];
+		var tokens = normalizeHeaderValue(header).split(",");
+		for (var i = 0; i < tokens.length; i++) if (tokens[i].indexOf(";") > -1) {
+			var token = trim(tokens[i]).split(";v=");
+			arr[i] = {
+				brand: token[0],
+				version: token[1]
+			};
+		} else arr[i] = trim(tokens[i]);
+		return arr;
+	};
+	var lowerize = function(str) {
+		return isString(str) ? str.toLowerCase() : str;
+	};
+	var majorize = function(version) {
+		return isString(version) ? strip(/[^\d\.]/g, version).split(".")[0] : void 0;
+	};
+	var normalizeHeaderValue = function(str) {
+		return isString(str) ? trim(strip(/\\?\"/g, str), UA_MAX_LENGTH) : void 0;
+	};
+	var setProps = function(arr) {
+		for (var i in arr) {
+			if (!arr.hasOwnProperty(i)) continue;
+			var propName = arr[i];
+			if (typeof propName == TYPEOF.OBJECT && propName.length == 2) this[propName[0]] = propName[1];
+			else this[propName] = void 0;
+		}
+		return this;
+	};
+	var strip = function(pattern, str) {
+		return isString(str) ? str.replace(pattern, EMPTY) : str;
+	};
+	var trim = function(str, len) {
+		str = strip(/^\s\s*/, String(str));
+		return typeof len === TYPEOF.UNDEFINED ? str : str.substring(0, len);
+	};
+	var rgxMapper = function(ua, arrays) {
+		if (!ua || !arrays) return;
+		var i = 0, j, k, p, q, matches, match;
+		while (i < arrays.length && !matches) {
+			var regex = arrays[i], props = arrays[i + 1];
+			j = k = 0;
+			while (j < regex.length && !matches) {
+				if (!regex[j]) break;
+				matches = regex[j++].exec(ua);
+				if (!!matches) for (p = 0; p < props.length; p++) {
+					match = matches[++k];
+					q = props[p];
+					if (typeof q === TYPEOF.OBJECT && q.length > 0) {
+						if (q.length === 2) if (typeof q[1] == TYPEOF.FUNCTION) this[q[0]] = q[1].call(this, match);
+						else this[q[0]] = q[1];
+						else if (q.length >= 3) {
+							if (typeof q[1] === TYPEOF.FUNCTION && !(q[1].exec && q[1].test)) if (q.length > 3) this[q[0]] = match ? q[1].apply(this, q.slice(2)) : void 0;
+							else this[q[0]] = match ? q[1].call(this, match, q[2]) : void 0;
+							else if (q.length == 3) this[q[0]] = match ? match.replace(q[1], q[2]) : void 0;
+							else if (q.length == 4) this[q[0]] = match ? q[3].call(this, match.replace(q[1], q[2])) : void 0;
+							else if (q.length > 4) this[q[0]] = match ? q[3].apply(this, [match.replace(q[1], q[2])].concat(q.slice(4))) : void 0;
+						}
+					} else this[q] = match ? match : void 0;
+				}
+			}
+			i += 2;
+		}
+	};
+	var strTest = function(str, map) {
+		return map.test.test(str) ? map.ifTrue : map.ifFalse;
+	};
+	var strMapper = function(str, map) {
+		for (var i in map) if (typeof map[i] === TYPEOF.OBJECT && map[i].length > 0) {
+			for (var j = 0; j < map[i].length; j++) if (has(map[i][j], str)) return i === UNKNOWN ? void 0 : i;
+		} else if (has(map[i], str)) return i === UNKNOWN ? void 0 : i;
+		return map.hasOwnProperty("*") ? map["*"] : str;
+	};
+	var windowsVersionMap = {
+		"ME": "4.90",
+		"NT 3.51": "3.51",
+		"NT 4.0": "4.0",
+		"2000": ["5.0", "5.01"],
+		"XP": ["5.1", "5.2"],
+		"Vista": "6.0",
+		"7": "6.1",
+		"8": "6.2",
+		"8.1": "6.3",
+		"10": ["6.4", "10.0"],
+		"NT": ""
+	};
+	var formFactorsMap = {
+		"embedded": "Automotive",
+		"mobile": "Mobile",
+		"tablet": ["Tablet", "EInk"],
+		"smarttv": "TV",
+		"wearable": "Watch",
+		"xr": ["VR", "XR"],
+		"?": ["Desktop", "Unknown"],
+		"*": void 0
+	};
+	var browserHintsMap = {
+		"Chrome": "Google Chrome",
+		"Edge": "Microsoft Edge",
+		"Edge WebView2": "Microsoft Edge WebView2",
+		"Chrome WebView": "Android WebView",
+		"Chrome Headless": "HeadlessChrome",
+		"Huawei Browser": "HuaweiBrowser",
+		"MIUI Browser": "Miui Browser",
+		"Opera Mobi": "OperaMobile",
+		"Yandex": "YaBrowser"
+	};
+	var defaultRegexes = {
+		browser: [
+			[/\b(?:crmo|crios)\/([\w\.]+)/i],
+			[VERSION, [NAME, PREFIX_MOBILE + "Chrome"]],
+			[/webview.+edge\/([\w\.]+)/i],
+			[
+				VERSION,
+				[NAME, EDGE + " WebView"],
+				[TYPE, INAPP]
+			],
+			[/edg(?:e|ios|a)?\/([\w\.]+)/i],
+			[VERSION, [NAME, "Edge"]],
+			[
+				/(opera mini)\/([-\w\.]+)/i,
+				/(opera [mobiletab]{3,6})\b.+version\/([-\w\.]+)/i,
+				/(opera)(?:.+version\/|[\/ ]+)([\w\.]+)/i
+			],
+			[NAME, VERSION],
+			[/opios[\/ ]+([\w\.]+)/i],
+			[VERSION, [NAME, OPERA + " Mini"]],
+			[/\bop(?:rg)?x\/([\w\.]+)/i],
+			[VERSION, [NAME, OPERA + " GX"]],
+			[/\bopr\/([\w\.]+)/i],
+			[VERSION, [NAME, OPERA]],
+			[/\bb[ai]*d(?:uhd|[ub]*[aekoprswx]{5,6})[\/ ]?([\w\.]+)/i],
+			[VERSION, [NAME, "Baidu"]],
+			[/\b(?:mxbrowser|mxios|myie2)\/?([-\w\.]*)\b/i],
+			[VERSION, [NAME, "Maxthon"]],
+			[
+				/(kindle)\/([\w\.]+)/i,
+				/(lunascape|maxthon|netfront|jasmine|blazer|sleipnir)[\/ ]?([\w\.]*)/i,
+				/(avant|iemobile|slim(?:browser|boat|jet))[\/ ]?([\d\.]*)/i,
+				/(?:ms|\()(ie) ([\w\.]+)/i,
+				/(atlas|flock|rockmelt|midori|epiphany|silk|skyfire|bolt|iron|vivaldi|iridium|phantomjs|bowser|qupzilla|falkon|rekonq|puffin|whale(?!.+naver)|qqbrowserlite|duckduckgo|klar|helio|(?=comodo_)?dragon|otter|dooble|(?:hi|lg |ovi|qute)browser|palemoon)\/v?([-\w\.]+)/i,
+				/(brave)(?: chrome)?\/([\d\.]+)/i,
+				/(aloha|heytap|ovi|115|surf|qwant)browser\/([\d\.]+)/i,
+				/(qwant)(?:ios|mobile)\/([\d\.]+)/i,
+				/(ecosia|weibo)(?:__| \w+@)([\d\.]+)/i
+			],
+			[NAME, VERSION],
+			[/quark(?:pc)?\/([-\w\.]+)/i],
+			[VERSION, [NAME, "Quark"]],
+			[/\bddg\/([\w\.]+)/i],
+			[VERSION, [NAME, "DuckDuckGo"]],
+			[/(?:\buc? ?browser|(?:juc.+)ucweb| ucpc)[\/ ]?([\w\.]+)/i],
+			[VERSION, [NAME, "UCBrowser"]],
+			[
+				/microm.+\bqbcore\/([\w\.]+)/i,
+				/\bqbcore\/([\w\.]+).+microm/i,
+				/micromessenger\/([\w\.]+)/i
+			],
+			[VERSION, [NAME, "WeChat"]],
+			[/konqueror\/([\w\.]+)/i],
+			[VERSION, [NAME, "Konqueror"]],
+			[/trident.+rv[: ]([\w\.]{1,9})\b.+like gecko/i],
+			[VERSION, [NAME, "IE"]],
+			[/ya(?:search)?browser\/([\w\.]+)/i],
+			[VERSION, [NAME, "Yandex"]],
+			[/slbrowser\/([\w\.]+)/i],
+			[VERSION, [NAME, "Smart " + LENOVO + SUFFIX_BROWSER]],
+			[/(av(?:ast|g|ira))\/([\w\.]+)/i],
+			[[
+				NAME,
+				/(.+)/,
+				"$1 Secure" + SUFFIX_BROWSER
+			], VERSION],
+			[/norton\/([\w\.]+)/i],
+			[VERSION, [NAME, "Norton Private" + SUFFIX_BROWSER]],
+			[/\bfocus\/([\w\.]+)/i],
+			[VERSION, [NAME, FIREFOX + " Focus"]],
+			[/ mms\/([\w\.]+)$/i],
+			[VERSION, [NAME, OPERA + " Neon"]],
+			[/ opt\/([\w\.]+)$/i],
+			[VERSION, [NAME, OPERA + " Touch"]],
+			[/coc_coc\w+\/([\w\.]+)/i],
+			[VERSION, [NAME, "Coc Coc"]],
+			[/dolfin\/([\w\.]+)/i],
+			[VERSION, [NAME, "Dolphin"]],
+			[/coast\/([\w\.]+)/i],
+			[VERSION, [NAME, OPERA + " Coast"]],
+			[/miuibrowser\/([\w\.]+)/i],
+			[VERSION, [NAME, "MIUI" + SUFFIX_BROWSER]],
+			[/fxios\/([\w\.-]+)/i],
+			[VERSION, [NAME, PREFIX_MOBILE + FIREFOX]],
+			[/\bqihoobrowser\/?([\w\.]*)/i],
+			[VERSION, [NAME, "360"]],
+			[/\b(qq)\/([\w\.]+)/i],
+			[[
+				NAME,
+				/(.+)/,
+				"$1Browser"
+			], VERSION],
+			[/(oculus|sailfish|huawei|vivo|pico)browser\/([\w\.]+)/i],
+			[[
+				NAME,
+				/(.+)/,
+				"$1" + SUFFIX_BROWSER
+			], VERSION],
+			[/ HBPC\/([\w\.]+)/],
+			[VERSION, [NAME, HUAWEI + SUFFIX_BROWSER]],
+			[/samsungbrowser\/([\w\.]+)/i],
+			[VERSION, [NAME, SAMSUNG + " Internet"]],
+			[/metasr[\/ ]?([\d\.]+)/i],
+			[VERSION, [NAME, SOGOU + " Explorer"]],
+			[/(sogou)mo\w+\/([\d\.]+)/i],
+			[[NAME, SOGOU + " Mobile"], VERSION],
+			[
+				/(electron)\/([\w\.]+) safari/i,
+				/(tesla)(?: qtcarbrowser|\/(20\d\d\.[-\w\.]+))/i,
+				/m?(qqbrowser|2345(?=browser|chrome|explorer))\w*[\/ ]?v?([\w\.]+)/i
+			],
+			[NAME, VERSION],
+			[/(lbbrowser|luakit|rekonq|steam(?= (clie|tenf|gameo)))/i],
+			[NAME],
+			[/ome\/([\w\.]+).+(iron(?= saf)|360(?=[es]e$))/i],
+			[VERSION, NAME],
+			[/((?:fban\/fbios|fb_iab\/fb4a)(?!.+fbav)|;fbav\/([\w\.]+);)/i],
+			[
+				[NAME, FACEBOOK],
+				VERSION,
+				[TYPE, INAPP]
+			],
+			[
+				/(kakao(?:talk|story))[\/ ]([\w\.]+)/i,
+				/(naver)\(.*?(\d+\.[\w\.]+).*\)/i,
+				/(daum)apps[\/ ]([\w\.]+)/i,
+				/safari (line)\/([\w\.]+)/i,
+				/\b(line)\/([\w\.]+)\/iab/i,
+				/(alipay)client\/([\w\.]+)/i,
+				/(twitter)(?:and| f.+e\/([\w\.]+))/i,
+				/(bing)(?:web|sapphire)\/([\w\.]+)/i,
+				/(instagram|snapchat|klarna)[\/ ]([-\w\.]+)/i
+			],
+			[
+				NAME,
+				VERSION,
+				[TYPE, INAPP]
+			],
+			[/\bgsa\/([\w\.]+) .*safari\//i],
+			[
+				VERSION,
+				[NAME, "GSA"],
+				[TYPE, INAPP]
+			],
+			[/(?:musical_ly|trill)(?:.+app_?version\/|_)([\w\.]+)/i],
+			[
+				VERSION,
+				[NAME, "TikTok"],
+				[TYPE, INAPP]
+			],
+			[/\[(linkedin)app\]/i],
+			[NAME, [TYPE, INAPP]],
+			[/(zalo(?:app)?)[\/\sa-z]*([\w\.-]+)/i],
+			[
+				[
+					NAME,
+					/(.+)/,
+					"Zalo"
+				],
+				VERSION,
+				[TYPE, INAPP]
+			],
+			[/(chromium)[\/ ]([-\w\.]+)/i],
+			[NAME, VERSION],
+			[/ome-(lighthouse)$/i],
+			[NAME, [TYPE, FETCHER]],
+			[/headlesschrome(?:\/([\w\.]+)| )/i],
+			[VERSION, [NAME, CHROME + " Headless"]],
+			[/wv\).+chrome\/([\w\.]+).+edgw\//i],
+			[
+				VERSION,
+				[NAME, EDGE + " WebView2"],
+				[TYPE, INAPP]
+			],
+			[/; wv\).+(chrome)\/([\w\.]+)/i],
+			[
+				[NAME, CHROME + " WebView"],
+				VERSION,
+				[TYPE, INAPP]
+			],
+			[/droid.+ version\/([\w\.]+)\b.+(?:mobile safari|safari)/i],
+			[VERSION, [NAME, "Android" + SUFFIX_BROWSER]],
+			[/chrome\/([\w\.]+) mobile/i],
+			[VERSION, [NAME, PREFIX_MOBILE + "Chrome"]],
+			[/(chrome|omniweb|arora|[tizenoka]{5} ?browser)\/v?([\w\.]+)/i],
+			[NAME, VERSION],
+			[/version\/([\w\.\,]+) .*mobile(?:\/\w+ | ?)safari/i],
+			[VERSION, [NAME, PREFIX_MOBILE + "Safari"]],
+			[/iphone .*mobile(?:\/\w+ | ?)safari/i],
+			[[NAME, PREFIX_MOBILE + "Safari"]],
+			[/version\/([\w\.\,]+) .*(safari)/i],
+			[VERSION, NAME],
+			[/webkit.+?(mobile ?safari|safari)(\/[\w\.]+)/i],
+			[NAME, [VERSION, "1"]],
+			[/(webkit|khtml)\/([\w\.]+)/i],
+			[NAME, VERSION],
+			[/(?:mobile|tablet);.*(firefox)\/([\w\.-]+)/i],
+			[[NAME, PREFIX_MOBILE + FIREFOX], VERSION],
+			[/(navigator|netscape\d?)\/([-\w\.]+)/i],
+			[[NAME, "Netscape"], VERSION],
+			[/(wolvic|librewolf)\/([\w\.]+)/i],
+			[NAME, VERSION],
+			[/mobile vr; rv:([\w\.]+)\).+firefox/i],
+			[VERSION, [NAME, FIREFOX + " Reality"]],
+			[
+				/ekiohf.+(flow)\/([\w\.]+)/i,
+				/(swiftfox)/i,
+				/(icedragon|iceweasel|camino|chimera|fennec|maemo browser|minimo|conkeror)[\/ ]?([\w\.\+]+)/i,
+				/(seamonkey|k-meleon|icecat|iceape|firebird|phoenix|basilisk|waterfox)\/([-\w\.]+)$/i,
+				/(firefox)\/([\w\.]+)/i,
+				/(mozilla)\/([\w\.]+(?= .+rv\:.+gecko\/\d+)|[0-4][\w\.]+(?!.+compatible))/i,
+				/(amaya|dillo|doris|icab|ladybird|lynx|mosaic|netsurf|obigo|polaris|w3m|(?:go|ice|up)[\. ]?browser)[-\/ ]?v?([\w\.]+)/i,
+				/\b(links) \(([\w\.]+)/i
+			],
+			[NAME, [
+				VERSION,
+				/_/g,
+				"."
+			]],
+			[/(cobalt)\/([\w\.]+)/i],
+			[NAME, [
+				VERSION,
+				/[^\d\.]+./,
+				EMPTY
+			]]
+		],
+		cpu: [
+			[/\b((amd|x|x86[-_]?|wow|win)64)\b/i],
+			[[ARCHITECTURE, "amd64"]],
+			[/(ia32(?=;))/i, /\b((i[346]|x)86)(pc)?\b/i],
+			[[ARCHITECTURE, "ia32"]],
+			[/\b(aarch64|arm(v?[89]e?l?|_?64))\b/i],
+			[[ARCHITECTURE, "arm64"]],
+			[/\b(arm(v[67])?ht?n?[fl]p?)\b/i],
+			[[ARCHITECTURE, "armhf"]],
+			[/( (ce|mobile); ppc;|\/[\w\.]+arm\b)/i],
+			[[ARCHITECTURE, "arm"]],
+			[/ sun4\w[;\)]/i],
+			[[ARCHITECTURE, "sparc"]],
+			[
+				/\b(avr32|ia64(?=;)|68k(?=\))|\barm(?=v([1-7]|[5-7]1)l?|;|eabi)|(irix|mips|sparc)(64)?\b|pa-risc)/i,
+				/((ppc|powerpc)(64)?)( mac|;|\))/i,
+				/(?:osf1|[freopnt]{3,4}bsd) (alpha)/i
+			],
+			[[
+				ARCHITECTURE,
+				/ower/,
+				EMPTY,
+				lowerize
+			]],
+			[/mc680.0/i],
+			[[ARCHITECTURE, "68k"]],
+			[/winnt.+\[axp/i],
+			[[ARCHITECTURE, "alpha"]]
+		],
+		device: [
+			[/\b(sch-i[89]0\d|shw-m380s|sm-[ptx]\w{2,4}|gt-[pn]\d{2,4}|sgh-t8[56]9|nexus 10)/i],
+			[
+				MODEL,
+				[VENDOR, SAMSUNG],
+				[TYPE, TABLET]
+			],
+			[
+				/\b((?:s[cgp]h|gt|sm)-(?![lr])\w+|sc[g-]?[\d]+a?|galaxy nexus)/i,
+				/samsung[- ]((?!sm-[lr]|browser)[-\w]+)/i,
+				/sec-(sgh\w+)/i
+			],
+			[
+				MODEL,
+				[VENDOR, SAMSUNG],
+				[TYPE, MOBILE]
+			],
+			[/(?:\/|\()(ip(?:hone|od)[\w, ]*)[\/\);]/i],
+			[
+				MODEL,
+				[VENDOR, APPLE],
+				[TYPE, MOBILE]
+			],
+			[/\b(?:ios|apple\w+)\/.+[\(\/](ipad)/i, /\b(ipad)[\d,]*[;\] ].+(mac |i(pad)?)os/i],
+			[
+				MODEL,
+				[VENDOR, APPLE],
+				[TYPE, TABLET]
+			],
+			[/(macintosh);/i],
+			[MODEL, [VENDOR, APPLE]],
+			[/\b(sh-?[altvz]?\d\d[a-ekm]?)/i],
+			[
+				MODEL,
+				[VENDOR, SHARP],
+				[TYPE, MOBILE]
+			],
+			[/\b((?:brt|eln|hey2?|gdi|jdn)-a?[lnw]09|(?:ag[rm]3?|jdn2|kob2)-a?[lw]0[09]hn)(?: bui|\)|;)/i],
+			[
+				MODEL,
+				[VENDOR, HONOR],
+				[TYPE, TABLET]
+			],
+			[/honor([-\w ]+)[;\)]/i],
+			[
+				MODEL,
+				[VENDOR, HONOR],
+				[TYPE, MOBILE]
+			],
+			[/\b((?:ag[rs][2356]?k?|bah[234]?|bg[2o]|bt[kv]|cmr|cpn|db[ry]2?|jdn2|got|kob2?k?|mon|pce|scm|sht?|[tw]gr|vrd)-[ad]?[lw][0125][09]b?|605hw|bg2-u03|(?:gem|fdr|m2|ple|t1)-[7a]0[1-4][lu]|t1-a2[13][lw]|mediapad[\w\. ]*(?= bui|\)))\b(?!.+d\/s)/i],
+			[
+				MODEL,
+				[VENDOR, HUAWEI],
+				[TYPE, TABLET]
+			],
+			[/(?:huawei) ?([-\w ]+)[;\)]/i, /\b(nexus 6p|\w{2,4}e?-[atu]?[ln][\dx][\dc][adnt]?)\b(?!.+d\/s)/i],
+			[
+				MODEL,
+				[VENDOR, HUAWEI],
+				[TYPE, MOBILE]
+			],
+			[/oid[^\)]+; (2[\dbc]{4}(182|283|rp\w{2})[cgl]|m2105k81a?c)(?: bui|\))/i, /\b(?:xiao)?((?:red)?mi[-_ ]?pad[\w- ]*)(?: bui|\))/i],
+			[
+				[
+					MODEL,
+					/_/g,
+					" "
+				],
+				[VENDOR, XIAOMI],
+				[TYPE, TABLET]
+			],
+			[
+				/\b; (\w+) build\/hm\1/i,
+				/\b(hm[-_ ]?note?[_ ]?(?:\d\w)?) bui/i,
+				/oid[^\)]+; (redmi[\-_ ]?(?:note|k)?[\w_ ]+|m?[12]\d[01]\d\w{3,6}|poco[\w ]+|(shark )?\w{3}-[ah]0|qin ?[1-3](s\+|ultra| pro)?)( bui|; wv|\))/i,
+				/\b(mi[-_ ]?(?:a\d|one|one[_ ]plus|note|max|cc)?[_ ]?(?:\d{0,2}\w?)[_ ]?(?:plus|se|lite|pro)?( 5g|lte)?)(?: bui|\))/i,
+				/; ([\w ]+) miui\/v?\d/i
+			],
+			[
+				[
+					MODEL,
+					/_/g,
+					" "
+				],
+				[VENDOR, XIAOMI],
+				[TYPE, MOBILE]
+			],
+			[/droid.+; (cph2[3-6]\d[13579]|((gm|hd)19|(ac|be|in|kb)20|(d[en]|eb|le|mt)21|ne22)[0-2]\d|p[g-l]\w[1m]10)\b/i, /(?:one)?(?:plus)? (a\d0\d\d)(?: b|\))/i],
+			[
+				MODEL,
+				[VENDOR, ONEPLUS],
+				[TYPE, MOBILE]
+			],
+			[/; (\w+) bui.+ oppo/i, /\b(cph[12]\d{3}|p(?:af|c[al]|d\w|e[ar])[mt]\d0|x9007|a101op)\b/i],
+			[
+				MODEL,
+				[VENDOR, OPPO],
+				[TYPE, MOBILE]
+			],
+			[/\b(opd2(\d{3}a?))(?: bui|\))/i],
+			[
+				MODEL,
+				[
+					VENDOR,
+					strMapper,
+					{
+						"OnePlus": [
+							"203",
+							"304",
+							"403",
+							"404",
+							"413",
+							"415"
+						],
+						"*": OPPO
+					}
+				],
+				[TYPE, TABLET]
+			],
+			[/(vivo (5r?|6|8l?|go|one|s|x[il]?[2-4]?)[\w\+ ]*)(?: bui|\))/i],
+			[
+				MODEL,
+				[VENDOR, "BLU"],
+				[TYPE, MOBILE]
+			],
+			[/; vivo (\w+)(?: bui|\))/i, /\b(v[12]\d{3}\w?[at])(?: bui|;)/i],
+			[
+				MODEL,
+				[VENDOR, "Vivo"],
+				[TYPE, MOBILE]
+			],
+			[/\b(rmx[1-3]\d{3})(?: bui|;|\))/i],
+			[
+				MODEL,
+				[VENDOR, "Realme"],
+				[TYPE, MOBILE]
+			],
+			[/(ideatab[-\w ]+|602lv|d-42a|a101lv|a2109a|a3500-hv|s[56]000|pb-6505[my]|tb-?x?\d{3,4}(?:f[cu]|xu|[av])|yt\d?-[jx]?\d+[lfmx])( bui|;|\)|\/)/i, /lenovo ?(b[68]0[08]0-?[hf]?|tab(?:[\w- ]+?)|tb[\w-]{6,7})( bui|;|\)|\/)/i],
+			[
+				MODEL,
+				[VENDOR, LENOVO],
+				[TYPE, TABLET]
+			],
+			[/lenovo[-_ ]?([-\w ]+?)(?: bui|\)|\/)/i],
+			[
+				MODEL,
+				[VENDOR, LENOVO],
+				[TYPE, MOBILE]
+			],
+			[
+				/\b(milestone|droid(?:[2-4x]| (?:bionic|x2|pro|razr))?:?( 4g)?)\b[\w ]+build\//i,
+				/\bmot(?:orola)?[- ]([\w\s]+)(\)| bui)/i,
+				/((?:moto(?! 360)[-\w\(\) ]+|xt\d{3,4}[cgkosw\+]?[-\d]*|nexus 6)(?= bui|\)))/i
+			],
+			[
+				MODEL,
+				[VENDOR, MOTOROLA],
+				[TYPE, MOBILE]
+			],
+			[/\b(mz60\d|xoom[2 ]{0,2}) build\//i],
+			[
+				MODEL,
+				[VENDOR, MOTOROLA],
+				[TYPE, TABLET]
+			],
+			[/\b(?:lg)?([vl]k\-?\d{3}) bui| 3\.[-\w; ]{10}lg?-([06cv9]{3,4})/i],
+			[
+				MODEL,
+				[VENDOR, LG],
+				[TYPE, TABLET]
+			],
+			[
+				/(lm(?:-?f100[nv]?|-[\w\.]+)(?= bui|\))|nexus [45])/i,
+				/\blg[-e;\/ ]+(?!.*(?:browser|netcast|android tv|watch|webos))(\w+)/i,
+				/\blg-?([\d\w]+) bui/i
+			],
+			[
+				MODEL,
+				[VENDOR, LG],
+				[TYPE, MOBILE]
+			],
+			[/(nokia) (t[12][01])/i],
+			[
+				VENDOR,
+				MODEL,
+				[TYPE, TABLET]
+			],
+			[/(?:maemo|nokia).*(n900|lumia \d+|rm-\d+)/i, /nokia[-_ ]?(([-\w\. ]*?))( bui|\)|;|\/)/i],
+			[
+				[
+					MODEL,
+					/_/g,
+					" "
+				],
+				[TYPE, MOBILE],
+				[VENDOR, "Nokia"]
+			],
+			[/(pixel (c|tablet))\b/i],
+			[
+				MODEL,
+				[VENDOR, GOOGLE],
+				[TYPE, TABLET]
+			],
+			[/droid.+;(?: google)? (g(01[13]a|020[aem]|025[jn]|1b60|1f8f|2ybb|4s1m|576d|5nz6|8hhn|8vou|a02099|c15s|d1yq|e2ae|ec77|gh2x|kv4x|p4bc|pj41|r83y|tt9q|ur25|wvk6)|pixel[\d ]*a?( pro)?( xl)?( fold)?( \(5g\))?)( bui|\))/i],
+			[
+				MODEL,
+				[VENDOR, GOOGLE],
+				[TYPE, MOBILE]
+			],
+			[/(google) (pixelbook( go)?)/i],
+			[VENDOR, MODEL],
+			[/droid.+; (a?\d[0-2]{2}so|[c-g]\d{4}|so[-gl]\w+|xq-\w\w\d\d)(?= bui|\).+chrome\/(?![1-6]{0,1}\d\.))/i],
+			[
+				MODEL,
+				[VENDOR, SONY],
+				[TYPE, MOBILE]
+			],
+			[/sony tablet [ps]/i, /\b(?:sony)?sgp\w+(?: bui|\))/i],
+			[
+				[MODEL, "Xperia Tablet"],
+				[VENDOR, SONY],
+				[TYPE, TABLET]
+			],
+			[
+				/(alexa)webm/i,
+				/(kf[a-z]{2}wi|aeo(?!bc)\w\w)( bui|\))/i,
+				/(kf[a-z]+)( bui|\)).+silk\//i
+			],
+			[
+				MODEL,
+				[VENDOR, AMAZON],
+				[TYPE, TABLET]
+			],
+			[/((?:sd|kf)[0349hijorstuw]+)( bui|\)).+silk\//i],
+			[
+				[
+					MODEL,
+					/(.+)/g,
+					"Fire Phone $1"
+				],
+				[VENDOR, AMAZON],
+				[TYPE, MOBILE]
+			],
+			[/(playbook);[-\w\),; ]+(rim)/i],
+			[
+				MODEL,
+				VENDOR,
+				[TYPE, TABLET]
+			],
+			[/\b((?:bb[a-f]|st[hv])100-\d)/i, /(?:blackberry|\(bb10;) (\w+)/i],
+			[
+				MODEL,
+				[VENDOR, BLACKBERRY],
+				[TYPE, MOBILE]
+			],
+			[/(?:\b|asus_)(transfo[prime ]{4,10} \w+|eeepc|slider \w+|nexus 7|padfone|p00[cj])/i],
+			[
+				MODEL,
+				[VENDOR, ASUS],
+				[TYPE, TABLET]
+			],
+			[/ (z[bes]6[027][012][km][ls]|zenfone \d\w?)\b/i],
+			[
+				MODEL,
+				[VENDOR, ASUS],
+				[TYPE, MOBILE]
+			],
+			[/(nexus 9)/i],
+			[
+				MODEL,
+				[VENDOR, "HTC"],
+				[TYPE, TABLET]
+			],
+			[
+				/(htc)[-;_ ]{1,2}([\w ]+(?=\)| bui)|\w+)/i,
+				/(zte)[- ]([\w ]+?)(?: bui|\/|\))/i,
+				/(alcatel|geeksphone|nexian|panasonic(?!(?:;|\.))|sony(?!-bra))[-_ ]?([-\w]*)/i
+			],
+			[
+				VENDOR,
+				[
+					MODEL,
+					/_/g,
+					" "
+				],
+				[TYPE, MOBILE]
+			],
+			[/tcl (xess p17aa)/i, /droid [\w\.]+; ((?:8[14]9[16]|9(?:0(?:48|60|8[01])|1(?:3[27]|66)|2(?:6[69]|9[56])|466))[gqswx])(_\w(\w|\w\w))?(\)| bui)/i],
+			[
+				MODEL,
+				[VENDOR, "TCL"],
+				[TYPE, TABLET]
+			],
+			[/droid [\w\.]+; (418(?:7d|8v)|5087z|5102l|61(?:02[dh]|25[adfh]|27[ai]|56[dh]|59k|65[ah])|a509dl|t(?:43(?:0w|1[adepqu])|50(?:6d|7[adju])|6(?:09dl|10k|12b|71[efho]|76[hjk])|7(?:66[ahju]|67[hw]|7[045][bh]|71[hk]|73o|76[ho]|79w|81[hks]?|82h|90[bhsy]|99b)|810[hs]))(_\w(\w|\w\w))?(\)| bui)/i],
+			[
+				MODEL,
+				[VENDOR, "TCL"],
+				[TYPE, MOBILE]
+			],
+			[/(itel) ((\w+))/i],
+			[
+				[VENDOR, lowerize],
+				MODEL,
+				[
+					TYPE,
+					strMapper,
+					{
+						"tablet": ["p10001l", "w7001"],
+						"*": "mobile"
+					}
+				]
+			],
+			[/droid.+; ([ab][1-7]-?[0178a]\d\d?)/i],
+			[
+				MODEL,
+				[VENDOR, "Acer"],
+				[TYPE, TABLET]
+			],
+			[/droid.+; (m[1-5] note) bui/i, /\bmz-([-\w]{2,})/i],
+			[
+				MODEL,
+				[VENDOR, "Meizu"],
+				[TYPE, MOBILE]
+			],
+			[/; ((?:power )?armor(?:[\w ]{0,8}))(?: bui|\))/i],
+			[
+				MODEL,
+				[VENDOR, "Ulefone"],
+				[TYPE, MOBILE]
+			],
+			[/; (energy ?\w+)(?: bui|\))/i, /; energizer ([\w ]+)(?: bui|\))/i],
+			[
+				MODEL,
+				[VENDOR, "Energizer"],
+				[TYPE, MOBILE]
+			],
+			[/; cat (b35);/i, /; (b15q?|s22 flip|s48c|s62 pro)(?: bui|\))/i],
+			[
+				MODEL,
+				[VENDOR, "Cat"],
+				[TYPE, MOBILE]
+			],
+			[/((?:new )?andromax[\w- ]+)(?: bui|\))/i],
+			[
+				MODEL,
+				[VENDOR, "Smartfren"],
+				[TYPE, MOBILE]
+			],
+			[/droid.+; (a(in)?(0(15|59|6[35])|142)p?)/i],
+			[
+				MODEL,
+				[VENDOR, "Nothing"],
+				[TYPE, MOBILE]
+			],
+			[/; (x67 5g|tikeasy \w+|ac[1789]\d\w+)( b|\))/i, /archos ?(5|gamepad2?|([\w ]*[t1789]|hello) ?\d+[\w ]*)( b|\))/i],
+			[
+				MODEL,
+				[VENDOR, "Archos"],
+				[TYPE, TABLET]
+			],
+			[/archos ([\w ]+)( b|\))/i, /; (ac[3-6]\d\w{2,8})( b|\))/i],
+			[
+				MODEL,
+				[VENDOR, "Archos"],
+				[TYPE, MOBILE]
+			],
+			[/blackview ([-\w ]+)( b|\))/i, /; (bv\d{4}[-\w ]*)( b|\))/i],
+			[
+				MODEL,
+				[VENDOR, "Blackview"],
+				[TYPE, MOBILE]
+			],
+			[/; (n159v)/i],
+			[
+				MODEL,
+				[VENDOR, "HMD"],
+				[TYPE, MOBILE]
+			],
+			[/((revvl[ \w\+]+|tm(?:rv|af)\w*[45]g(?:tb)?))( b|\))/i],
+			[
+				MODEL,
+				[
+					TYPE,
+					strTest,
+					{
+						"test": /ta?b/i,
+						"ifTrue": TABLET,
+						"ifFalse": MOBILE
+					}
+				],
+				[VENDOR, "T-Mobile"]
+			],
+			[/(imo) (tab \w+)/i, /(infinix|tecno) (x1101b?|p904|dp(7c|8d|10a)( pro)?|p70[1-3]a?|p904|t1101)/i],
+			[
+				VENDOR,
+				MODEL,
+				[TYPE, TABLET]
+			],
+			[
+				/(blackberry|benq|palm(?=\-)|sonyericsson|acer|asus(?! zenw)|dell|jolla|meizu|motorola|polytron|tecno|micromax|advan)[-_ ]?([-\w]*)/i,
+				/; (blu|coolpad|cubot|hmd|imo|infinix|lava|oneplus|tcl|wiko)[_ ]([-\w\+ ]+?)(?: bui|\)|; r)/i,
+				/(hp) ([\w ]+\w)/i,
+				/(microsoft); (lumia[\w ]+)/i,
+				/(oppo) ?([\w ]+) bui/i,
+				/(hisense) ([ehv][\w ]+)\)/i,
+				/droid[^;]+; (philips)[_ ]([sv-x][\d]{3,4}[xz]?)/i
+			],
+			[
+				VENDOR,
+				MODEL,
+				[TYPE, MOBILE]
+			],
+			[
+				/(kobo)\s(ereader|touch)/i,
+				/(hp).+(touchpad(?!.+tablet)|tablet)/i,
+				/(kindle)\/([\w\.]+)/i
+			],
+			[
+				VENDOR,
+				MODEL,
+				[TYPE, TABLET]
+			],
+			[/(surface duo)/i],
+			[
+				MODEL,
+				[VENDOR, MICROSOFT],
+				[TYPE, TABLET]
+			],
+			[/droid [\d\.]+; (fp\du?)(?: b|\))/i],
+			[
+				MODEL,
+				[VENDOR, "Fairphone"],
+				[TYPE, MOBILE]
+			],
+			[/((?:tegranote|shield t(?!.+d tv))[\w- ]*?)(?: b|\))/i],
+			[
+				MODEL,
+				[VENDOR, NVIDIA],
+				[TYPE, TABLET]
+			],
+			[/(sprint) (\w+)/i],
+			[
+				VENDOR,
+				MODEL,
+				[TYPE, MOBILE]
+			],
+			[/(kin\.[onetw]{3})/i],
+			[
+				[
+					MODEL,
+					/\./g,
+					" "
+				],
+				[VENDOR, MICROSOFT],
+				[TYPE, MOBILE]
+			],
+			[/droid.+; ([c6]+|et5[16]|mc[239][23]x?|vc8[03]x?)\)/i],
+			[
+				MODEL,
+				[VENDOR, ZEBRA],
+				[TYPE, TABLET]
+			],
+			[/droid.+; (ec30|ps20|tc[2-8]\d[kx])\)/i],
+			[
+				MODEL,
+				[VENDOR, ZEBRA],
+				[TYPE, MOBILE]
+			],
+			[/(philips)[\w ]+tv/i, /smart-tv.+(samsung)/i],
+			[VENDOR, [TYPE, SMARTTV]],
+			[/hbbtv.+maple;(\d+)/i],
+			[
+				[
+					MODEL,
+					/^/,
+					"SmartTV"
+				],
+				[VENDOR, SAMSUNG],
+				[TYPE, SMARTTV]
+			],
+			[/(vizio)(?: |.+model\/)(\w+-\w+)/i, /tcast.+(lg)e?. ([-\w]+)/i],
+			[
+				VENDOR,
+				MODEL,
+				[TYPE, SMARTTV]
+			],
+			[/(nux; netcast.+smarttv|lg (netcast\.tv-201\d|android tv))/i],
+			[[VENDOR, LG], [TYPE, SMARTTV]],
+			[/(apple) ?tv/i],
+			[
+				VENDOR,
+				[MODEL, APPLE + " TV"],
+				[TYPE, SMARTTV]
+			],
+			[/crkey.*devicetype\/chromecast/i],
+			[
+				[MODEL, CHROMECAST + " Third Generation"],
+				[VENDOR, GOOGLE],
+				[TYPE, SMARTTV]
+			],
+			[/crkey.*devicetype\/([^/]*)/i],
+			[
+				[
+					MODEL,
+					/^/,
+					"Chromecast "
+				],
+				[VENDOR, GOOGLE],
+				[TYPE, SMARTTV]
+			],
+			[/fuchsia.*crkey/i],
+			[
+				[MODEL, CHROMECAST + " Nest Hub"],
+				[VENDOR, GOOGLE],
+				[TYPE, SMARTTV]
+			],
+			[/crkey/i],
+			[
+				[MODEL, CHROMECAST],
+				[VENDOR, GOOGLE],
+				[TYPE, SMARTTV]
+			],
+			[/(portaltv)/i],
+			[
+				MODEL,
+				[VENDOR, FACEBOOK],
+				[TYPE, SMARTTV]
+			],
+			[/droid.+aft(\w+)( bui|\))/i],
+			[
+				MODEL,
+				[VENDOR, AMAZON],
+				[TYPE, SMARTTV]
+			],
+			[/(shield \w+ tv)/i],
+			[
+				MODEL,
+				[VENDOR, NVIDIA],
+				[TYPE, SMARTTV]
+			],
+			[/\(dtv[\);].+(aquos)/i, /(aquos-tv[\w ]+)\)/i],
+			[
+				MODEL,
+				[VENDOR, SHARP],
+				[TYPE, SMARTTV]
+			],
+			[/(bravia[\w ]+)( bui|\))/i],
+			[
+				MODEL,
+				[VENDOR, SONY],
+				[TYPE, SMARTTV]
+			],
+			[/(mi(tv|box)-?\w+) bui/i],
+			[
+				MODEL,
+				[VENDOR, XIAOMI],
+				[TYPE, SMARTTV]
+			],
+			[/Hbbtv.*(technisat) (.*);/i],
+			[
+				VENDOR,
+				MODEL,
+				[TYPE, SMARTTV]
+			],
+			[/\b(roku)[\dx]*[\)\/]((?:dvp-)?[\d\.]*)/i, /hbbtv\/\d+\.\d+\.\d+ +\([\w\+ ]*; *([\w\d][^;]*);([^;]*)/i],
+			[
+				[
+					VENDOR,
+					/.+\/(\w+)/,
+					"$1",
+					strMapper,
+					{ "LG": "lge" }
+				],
+				[MODEL, trim],
+				[TYPE, SMARTTV]
+			],
+			[/(playstation \w+)/i],
+			[
+				MODEL,
+				[VENDOR, SONY],
+				[TYPE, CONSOLE]
+			],
+			[/\b(xbox(?: one)?(?!; xbox))[\); ]/i],
+			[
+				MODEL,
+				[VENDOR, MICROSOFT],
+				[TYPE, CONSOLE]
+			],
+			[
+				/(ouya)/i,
+				/(nintendo) (\w+)/i,
+				/(retroid) (pocket ([^\)]+))/i,
+				/(valve).+(steam deck)/i,
+				/droid.+; ((shield|rgcube|gr0006))( bui|\))/i
+			],
+			[
+				[
+					VENDOR,
+					strMapper,
+					{
+						"Nvidia": "Shield",
+						"Anbernic": "RGCUBE",
+						"Logitech": "GR0006"
+					}
+				],
+				MODEL,
+				[TYPE, CONSOLE]
+			],
+			[/\b(sm-[lr]\d\d[0156][fnuw]?s?|gear live)\b/i],
+			[
+				MODEL,
+				[VENDOR, SAMSUNG],
+				[TYPE, WEARABLE]
+			],
+			[/((pebble))app/i, /(asus|google|lg|oppo|xiaomi) ((pixel |zen)?watch[\w ]*)( bui|\))/i],
+			[
+				VENDOR,
+				MODEL,
+				[TYPE, WEARABLE]
+			],
+			[/(ow(?:19|20)?we?[1-3]{1,3})/i],
+			[
+				MODEL,
+				[VENDOR, OPPO],
+				[TYPE, WEARABLE]
+			],
+			[/(watch)(?: ?os[,\/]|\d,\d\/)[\d\.]+/i],
+			[
+				MODEL,
+				[VENDOR, APPLE],
+				[TYPE, WEARABLE]
+			],
+			[/(opwwe\d{3})/i],
+			[
+				MODEL,
+				[VENDOR, ONEPLUS],
+				[TYPE, WEARABLE]
+			],
+			[/(moto 360)/i],
+			[
+				MODEL,
+				[VENDOR, MOTOROLA],
+				[TYPE, WEARABLE]
+			],
+			[/(smartwatch 3)/i],
+			[
+				MODEL,
+				[VENDOR, SONY],
+				[TYPE, WEARABLE]
+			],
+			[/(g watch r)/i],
+			[
+				MODEL,
+				[VENDOR, LG],
+				[TYPE, WEARABLE]
+			],
+			[/droid.+; (wt63?0{2,3})\)/i],
+			[
+				MODEL,
+				[VENDOR, ZEBRA],
+				[TYPE, WEARABLE]
+			],
+			[/droid.+; (glass) \d/i],
+			[
+				MODEL,
+				[VENDOR, GOOGLE],
+				[TYPE, XR]
+			],
+			[/(pico) ([\w ]+) os\d/i],
+			[
+				VENDOR,
+				MODEL,
+				[TYPE, XR]
+			],
+			[/(quest( \d| pro)?s?).+vr/i],
+			[
+				MODEL,
+				[VENDOR, FACEBOOK],
+				[TYPE, XR]
+			],
+			[/mobile vr; rv.+firefox/i],
+			[[TYPE, XR]],
+			[/(tesla)(?: qtcarbrowser|\/[-\w\.]+)/i],
+			[VENDOR, [TYPE, EMBEDDED]],
+			[/(aeobc)\b/i],
+			[
+				MODEL,
+				[VENDOR, AMAZON],
+				[TYPE, EMBEDDED]
+			],
+			[/(homepod).+mac os/i],
+			[
+				MODEL,
+				[VENDOR, APPLE],
+				[TYPE, EMBEDDED]
+			],
+			[/windows iot/i],
+			[[TYPE, EMBEDDED]],
+			[/droid.+; ([\w- ]+) (4k|android|smart|google)[- ]?tv/i],
+			[MODEL, [TYPE, SMARTTV]],
+			[/\b((4k|android|smart|opera)[- ]?tv|tv; rv:|large screen[\w ]+safari)\b/i],
+			[[TYPE, SMARTTV]],
+			[/droid .+?; ([^;]+?)(?: bui|; wv\)|\) applew|; hmsc).+?(mobile|vr|\d) safari/i],
+			[MODEL, [
+				TYPE,
+				strMapper,
+				{
+					"mobile": "Mobile",
+					"xr": "VR",
+					"*": TABLET
+				}
+			]],
+			[/\b((tablet|tab)[;\/]|focus\/\d(?!.+mobile))/i],
+			[[TYPE, TABLET]],
+			[/(phone|mobile(?:[;\/]| [ \w\/\.]*safari)|pda(?=.+windows ce))/i],
+			[[TYPE, MOBILE]],
+			[/droid .+?; ([\w\. -]+)( bui|\))/i],
+			[MODEL, [VENDOR, "Generic"]]
+		],
+		engine: [
+			[/windows.+ edge\/([\w\.]+)/i],
+			[VERSION, [NAME, EDGE + "HTML"]],
+			[/(arkweb)\/([\w\.]+)/i],
+			[NAME, VERSION],
+			[/webkit\/537\.36.+chrome\/(?!27)([\w\.]+)/i],
+			[VERSION, [NAME, "Blink"]],
+			[
+				/(presto)\/([\w\.]+)/i,
+				/(webkit|trident|netfront|netsurf|amaya|lynx|w3m|goanna|servo)\/([\w\.]+)/i,
+				/ekioh(flow)\/([\w\.]+)/i,
+				/(khtml|tasman|links|dillo)[\/ ]\(?([\w\.]+)/i,
+				/(icab)[\/ ]([23]\.[\d\.]+)/i,
+				/\b(libweb)/i
+			],
+			[NAME, VERSION],
+			[/ladybird\//i],
+			[[NAME, "LibWeb"]],
+			[/rv\:([\w\.]{1,9})\b.+(gecko)/i],
+			[VERSION, NAME]
+		],
+		os: [
+			[/(windows nt) (6\.[23]); arm/i],
+			[[
+				NAME,
+				/N/,
+				"R"
+			], [
+				VERSION,
+				strMapper,
+				windowsVersionMap
+			]],
+			[/(windows (?:phone|mobile|iot))(?: os)?[\/ ]?([\d\.]*( se)?)/i, /(windows)[\/ ](1[01]|2000|3\.1|7|8(\.1)?|9[58]|me|server 20\d\d( r2)?|vista|xp)/i],
+			[NAME, VERSION],
+			[/windows nt ?([\d\.\)]*)(?!.+xbox)/i, /\bwin(?=3| ?9|n)(?:nt| 9x )?([\d\.;]*)/i],
+			[[
+				VERSION,
+				/(;|\))/g,
+				"",
+				strMapper,
+				windowsVersionMap
+			], [NAME, WINDOWS]],
+			[/(windows ce)\/?([\d\.]*)/i],
+			[NAME, VERSION],
+			[
+				/[adehimnop]{4,7}\b(?:.*os ([\w]+) like mac|; opera)/i,
+				/(?:ios;fbsv|ios(?=.+ip(?:ad|hone)|.+apple ?tv)|ip(?:ad|hone)(?: |.+i(?:pad)?)os|apple ?tv.+ios)[\/ ]([\w\.]+)/i,
+				/\btvos ?([\w\.]+)/i,
+				/cfnetwork\/.+darwin/i
+			],
+			[[
+				VERSION,
+				/_/g,
+				"."
+			], [NAME, "iOS"]],
+			[/(mac os x) ?([\w\. ]*)/i, /(macintosh|mac_powerpc\b)(?!.+(haiku|morphos))/i],
+			[[NAME, "macOS"], [
+				VERSION,
+				/_/g,
+				"."
+			]],
+			[/android ([\d\.]+).*crkey/i],
+			[VERSION, [NAME, CHROMECAST + " Android"]],
+			[/fuchsia.*crkey\/([\d\.]+)/i],
+			[VERSION, [NAME, CHROMECAST + " Fuchsia"]],
+			[/crkey\/([\d\.]+).*devicetype\/smartspeaker/i],
+			[VERSION, [NAME, CHROMECAST + " SmartSpeaker"]],
+			[/linux.*crkey\/([\d\.]+)/i],
+			[VERSION, [NAME, CHROMECAST + " Linux"]],
+			[/crkey\/([\d\.]+)/i],
+			[VERSION, [NAME, CHROMECAST]],
+			[/droid ([\w\.]+)\b.+(android[- ]x86)/i],
+			[VERSION, NAME],
+			[/(ubuntu) ([\w\.]+) like android/i],
+			[[
+				NAME,
+				/(.+)/,
+				"$1 Touch"
+			], VERSION],
+			[/(harmonyos)[\/ ]?([\d\.]*)/i, /(android|bada|blackberry|kaios|maemo|meego|openharmony|qnx|rim tablet os|sailfish|series40|symbian|tizen)\w*[-\/\.; ]?([\d\.]*)/i],
+			[NAME, VERSION],
+			[/\(bb(10);/i],
+			[VERSION, [NAME, BLACKBERRY]],
+			[/(?:symbian ?os|symbos|s60(?=;)|series ?60)[-\/ ]?([\w\.]*)/i],
+			[VERSION, [NAME, "Symbian"]],
+			[/mozilla\/[\d\.]+ \((?:mobile[;\w ]*|tablet|tv|[^\)]*(?:viera|lg(?:l25|-d300)|alcatel ?o.+|y300-f1)); rv:([\w\.]+)\).+gecko\//i],
+			[VERSION, [NAME, FIREFOX + " OS"]],
+			[/\b(?:hp)?wos(?:browser)?\/([\w\.]+)/i, /webos(?:[ \/]?|\.tv-20(?=2[2-9]))(\d[\d\.]*)/i],
+			[VERSION, [NAME, "webOS"]],
+			[/web0s;.+?(?:chr[o0]me|safari)\/(\d+)/i],
+			[[
+				VERSION,
+				strMapper,
+				{
+					"25": "120",
+					"24": "108",
+					"23": "94",
+					"22": "87",
+					"6": "79",
+					"5": "68",
+					"4": "53",
+					"3": "38",
+					"2": "538",
+					"1": "537",
+					"*": "TV"
+				}
+			], [NAME, "webOS"]],
+			[/watch(?: ?os[,\/ ]|\d,\d\/)([\d\.]+)/i],
+			[VERSION, [NAME, "watchOS"]],
+			[/cros [\w]+(?:\)| ([\w\.]+)\b)/i],
+			[VERSION, [NAME, "Chrome OS"]],
+			[/kepler ([\w\.]+); (aft|aeo)/i],
+			[VERSION, [NAME, "Vega OS"]],
+			[
+				/(netrange)mmh/i,
+				/(nettv)\/(\d+\.[\w\.]+)/i,
+				/(nintendo|playstation) (\w+)/i,
+				/(xbox); +xbox ([^\);]+)/i,
+				/(pico) .+os([\w\.]+)/i,
+				/\b(joli|palm)\b ?(?:os)?\/?([\w\.]*)/i,
+				/linux.+(mint)[\/\(\) ]?([\w\.]*)/i,
+				/(mageia|vectorlinux|fuchsia|arcaos|arch(?= ?linux))[;l ]([\d\.]*)/i,
+				/([kxln]?ubuntu|debian|suse|opensuse|gentoo|slackware|fedora|mandriva|centos|pclinuxos|red ?hat|zenwalk|linpus|raspbian|plan 9|minix|risc os|contiki|deepin|manjaro|elementary os|sabayon|linspire|knoppix)(?: gnu[\/ ]linux)?(?: enterprise)?(?:[- ]linux)?(?:-gnu)?[-\/ ]?(?!chrom|package)([-\w\.]*)/i,
+				/((?:open)?solaris)[-\/ ]?([\w\.]*)/i,
+				/\b(aix)[; ]([1-9\.]{0,4})/i,
+				/(hurd|linux|morphos)(?: (?:arm|x86|ppc)\w*| ?)([\w\.]*)/i,
+				/(gnu) ?([\w\.]*)/i,
+				/\b([-frentopcghs]{0,5}bsd|dragonfly)[\/ ]?(?!amd|[ix346]{1,2}86)([\w\.]*)/i,
+				/(haiku) ?(r\d)?/i
+			],
+			[NAME, VERSION],
+			[/(sunos) ?([\d\.]*)/i],
+			[[NAME, "Solaris"], VERSION],
+			[/\b(beos|os\/2|amigaos|openvms|hp-ux|serenityos)/i, /(unix) ?([\w\.]*)/i],
+			[NAME, VERSION]
+		]
+	};
+	var defaultProps = (function() {
+		var props = {
+			init: {},
+			isIgnore: {},
+			isIgnoreRgx: {},
+			toString: {}
+		};
+		setProps.call(props.init, [
+			[BROWSER, [
+				NAME,
+				VERSION,
+				MAJOR,
+				TYPE
+			]],
+			[CPU, [ARCHITECTURE]],
+			[DEVICE, [
+				TYPE,
+				MODEL,
+				VENDOR
+			]],
+			[ENGINE, [NAME, VERSION]],
+			[OS, [NAME, VERSION]]
+		]);
+		setProps.call(props.isIgnore, [
+			[BROWSER, [VERSION, MAJOR]],
+			[ENGINE, [VERSION]],
+			[OS, [VERSION]]
+		]);
+		setProps.call(props.isIgnoreRgx, [[BROWSER, / ?browser$/i], [OS, / ?os$/i]]);
+		setProps.call(props.toString, [
+			[BROWSER, [NAME, VERSION]],
+			[CPU, [ARCHITECTURE]],
+			[DEVICE, [VENDOR, MODEL]],
+			[ENGINE, [NAME, VERSION]],
+			[OS, [NAME, VERSION]]
+		]);
+		return props;
+	})();
+	var createIData = function(item, itemType) {
+		var init_props = defaultProps.init[itemType], is_ignoreProps = defaultProps.isIgnore[itemType] || 0, is_ignoreRgx = defaultProps.isIgnoreRgx[itemType] || 0, toString_props = defaultProps.toString[itemType] || 0;
+		function IData() {
+			setProps.call(this, init_props);
+		}
+		IData.prototype.getItem = function() {
+			return item;
+		};
+		IData.prototype.withClientHints = function() {
+			if (!NAVIGATOR_UADATA) return item.parseCH().get();
+			return NAVIGATOR_UADATA.getHighEntropyValues(CH_ALL_VALUES).then(function(res) {
+				return item.setCH(new UACHData(res, false)).parseCH().get();
+			});
+		};
+		IData.prototype.withFeatureCheck = function() {
+			return item.detectFeature().get();
+		};
+		if (itemType != RESULT) {
+			IData.prototype.is = function(strToCheck) {
+				var is = false;
+				for (var i in this) if (this.hasOwnProperty(i) && !has(is_ignoreProps, i) && lowerize(is_ignoreRgx ? strip(is_ignoreRgx, this[i]) : this[i]) == lowerize(is_ignoreRgx ? strip(is_ignoreRgx, strToCheck) : strToCheck)) {
+					is = true;
+					if (strToCheck != TYPEOF.UNDEFINED) break;
+				} else if (strToCheck == TYPEOF.UNDEFINED && is) {
+					is = !is;
+					break;
+				}
+				return is;
+			};
+			IData.prototype.toString = function() {
+				var str = EMPTY;
+				for (var i in toString_props) if (typeof this[toString_props[i]] !== TYPEOF.UNDEFINED) str += (str ? " " : EMPTY) + this[toString_props[i]];
+				return str || TYPEOF.UNDEFINED;
+			};
+		}
+		IData.prototype.then = function(cb) {
+			var that = this;
+			var IDataResolve = function() {
+				for (var prop in that) if (that.hasOwnProperty(prop)) this[prop] = that[prop];
+			};
+			IDataResolve.prototype = {
+				is: IData.prototype.is,
+				toString: IData.prototype.toString,
+				withClientHints: IData.prototype.withClientHints,
+				withFeatureCheck: IData.prototype.withFeatureCheck
+			};
+			var resolveData = new IDataResolve();
+			cb(resolveData);
+			return resolveData;
+		};
+		return new IData();
+	};
+	function UACHData(uach, isHttpUACH) {
+		uach = uach || {};
+		setProps.call(this, CH_ALL_VALUES);
+		if (isHttpUACH) setProps.call(this, [
+			[BRANDS, itemListToArray(uach[CH])],
+			[FULLVERLIST, itemListToArray(uach[CH_FULL_VER_LIST])],
+			[MOBILE, /\?1/.test(uach[CH_MOBILE])],
+			[MODEL, normalizeHeaderValue(uach[CH_MODEL])],
+			[PLATFORM, normalizeHeaderValue(uach[CH_PLATFORM])],
+			[PLATFORMVER, normalizeHeaderValue(uach[CH_PLATFORM_VER])],
+			[ARCHITECTURE, normalizeHeaderValue(uach[CH_ARCH])],
+			[FORMFACTORS, itemListToArray(uach[CH_FORM_FACTORS])],
+			[BITNESS, normalizeHeaderValue(uach[CH_BITNESS])]
+		]);
+		else for (var prop in uach) if (this.hasOwnProperty(prop) && typeof uach[prop] !== TYPEOF.UNDEFINED) this[prop] = uach[prop];
+	}
+	function UAItem(itemType, ua, rgxMap, uaCH) {
+		setProps.call(this, [
+			["itemType", itemType],
+			["ua", ua],
+			["uaCH", uaCH],
+			["rgxMap", rgxMap],
+			["data", createIData(this, itemType)]
+		]);
+		return this;
+	}
+	UAItem.prototype.get = function(prop) {
+		if (!prop) return this.data;
+		return this.data.hasOwnProperty(prop) ? this.data[prop] : void 0;
+	};
+	UAItem.prototype.set = function(prop, val) {
+		this.data[prop] = val;
+		return this;
+	};
+	UAItem.prototype.setCH = function(ch) {
+		this.uaCH = ch;
+		return this;
+	};
+	UAItem.prototype.detectFeature = function() {
+		if (NAVIGATOR && NAVIGATOR.userAgent == this.ua) switch (this.itemType) {
+			case BROWSER:
+				if (NAVIGATOR.brave && typeof NAVIGATOR.brave.isBrave == TYPEOF.FUNCTION) this.set(NAME, "Brave");
+				break;
+			case DEVICE:
+				if (!this.get(TYPE) && NAVIGATOR_UADATA && NAVIGATOR_UADATA[MOBILE]) this.set(TYPE, MOBILE);
+				if (this.get(MODEL) == "Macintosh" && NAVIGATOR && typeof NAVIGATOR.standalone !== TYPEOF.UNDEFINED && NAVIGATOR.maxTouchPoints && NAVIGATOR.maxTouchPoints > 2) this.set(MODEL, "iPad").set(TYPE, TABLET);
+				break;
+			case OS:
+				if (!this.get(NAME) && NAVIGATOR_UADATA && NAVIGATOR_UADATA[PLATFORM]) this.set(NAME, NAVIGATOR_UADATA[PLATFORM]);
+				break;
+			case RESULT:
+				var data = this.data;
+				var detect = function(itemType) {
+					return data[itemType].getItem().detectFeature().get();
+				};
+				this.set(BROWSER, detect(BROWSER)).set(CPU, detect(CPU)).set(DEVICE, detect(DEVICE)).set(ENGINE, detect(ENGINE)).set(OS, detect(OS));
+		}
+		return this;
+	};
+	UAItem.prototype.parseUA = function() {
+		if (this.itemType != RESULT) rgxMapper.call(this.data, this.ua, this.rgxMap);
+		switch (this.itemType) {
+			case BROWSER:
+				this.set(MAJOR, majorize(this.get(VERSION)));
+				break;
+			case OS:
+				if (this.get(NAME) == "iOS" && this.get(VERSION)) {
+					if (/^1[89][^\d]/.exec(this.get(VERSION))) {
+						var realVersion = /\) Version\/((\d+)[\d\.]*)/.exec(this.ua);
+						if (realVersion && parseInt(realVersion[2], 10) >= 26) this.set(VERSION, realVersion[1]);
+					}
+				}
+				break;
+		}
+		return this;
+	};
+	UAItem.prototype.parseCH = function() {
+		var uaCH = this.uaCH, rgxMap = this.rgxMap;
+		switch (this.itemType) {
+			case BROWSER:
+			case ENGINE:
+				var brands = uaCH[FULLVERLIST] || uaCH[BRANDS], prevName;
+				if (brands) for (var i = 0; i < brands.length; i++) {
+					var brandName = brands[i].brand || brands[i], brandVersion = brands[i].version;
+					if (this.itemType == BROWSER && !/not.a.brand/i.test(brandName) && (!prevName || /Chrom/.test(prevName) && brandName != CHROMIUM || prevName == EDGE && /WebView2/.test(brandName))) {
+						brandName = strMapper(brandName, browserHintsMap);
+						prevName = this.get(NAME);
+						if (!(prevName && !/Chrom/.test(prevName) && /Chrom/.test(brandName))) this.set(NAME, brandName).set(VERSION, brandVersion).set(MAJOR, majorize(brandVersion));
+						prevName = brandName;
+					}
+					if (this.itemType == ENGINE && brandName == CHROMIUM) this.set(VERSION, brandVersion);
+				}
+				break;
+			case CPU:
+				var archName = uaCH[ARCHITECTURE];
+				if (archName) {
+					if (archName && uaCH[BITNESS] == "64") archName += "64";
+					rgxMapper.call(this.data, archName + ";", rgxMap);
+				}
+				break;
+			case DEVICE:
+				if (uaCH[MOBILE]) this.set(TYPE, MOBILE);
+				if (uaCH[MODEL]) {
+					this.set(MODEL, uaCH[MODEL]);
+					if (!this.get(TYPE) || !this.get(VENDOR)) {
+						var reParse = {};
+						rgxMapper.call(reParse, "droid 9; " + uaCH[MODEL] + ")", rgxMap);
+						if (!this.get(TYPE) && !!reParse.type) this.set(TYPE, reParse.type);
+						if (!this.get(VENDOR) && !!reParse.vendor) this.set(VENDOR, reParse.vendor);
+					}
+				}
+				if (uaCH[FORMFACTORS]) {
+					var ff;
+					if (typeof uaCH[FORMFACTORS] !== "string") {
+						var idx = 0;
+						while (!ff && idx < uaCH[FORMFACTORS].length) ff = strMapper(uaCH[FORMFACTORS][idx++], formFactorsMap);
+					} else ff = strMapper(uaCH[FORMFACTORS], formFactorsMap);
+					this.set(TYPE, ff);
+				}
+				break;
+			case OS:
+				var osName = uaCH[PLATFORM];
+				if (osName) {
+					var osVersion = uaCH[PLATFORMVER];
+					if (osName == WINDOWS) osVersion = parseInt(majorize(osVersion), 10) >= 13 ? "11" : "10";
+					this.set(NAME, osName).set(VERSION, osVersion);
+				}
+				if (this.get(NAME) == WINDOWS && uaCH[MODEL] == "Xbox") this.set(NAME, "Xbox").set(VERSION, void 0);
+				break;
+			case RESULT:
+				var data = this.data;
+				var parse = function(itemType) {
+					return data[itemType].getItem().setCH(uaCH).parseCH().get();
+				};
+				this.set(BROWSER, parse(BROWSER)).set(CPU, parse(CPU)).set(DEVICE, parse(DEVICE)).set(ENGINE, parse(ENGINE)).set(OS, parse(OS));
+		}
+		return this;
+	};
+	function UAParser(ua, extensions, headers) {
+		if (typeof ua === TYPEOF.OBJECT) {
+			if (isExtensions(ua, true)) {
+				if (typeof extensions === TYPEOF.OBJECT) headers = extensions;
+				extensions = ua;
+			} else {
+				headers = ua;
+				extensions = void 0;
+			}
+			ua = void 0;
+		} else if (typeof ua === TYPEOF.STRING && !isExtensions(extensions, true)) {
+			headers = extensions;
+			extensions = void 0;
+		}
+		if (headers) if (typeof headers.append === TYPEOF.FUNCTION) {
+			var kv = {};
+			headers.forEach(function(v, k) {
+				kv[String(k).toLowerCase()] = v;
+			});
+			headers = kv;
+		} else {
+			var normalized = {};
+			for (var header in headers) if (headers.hasOwnProperty(header)) normalized[String(header).toLowerCase()] = headers[header];
+			headers = normalized;
+		}
+		if (!(this instanceof UAParser)) return new UAParser(ua, extensions, headers).getResult();
+		var userAgent = typeof ua === TYPEOF.STRING ? ua : headers && headers[USER_AGENT] ? headers[USER_AGENT] : NAVIGATOR && NAVIGATOR.userAgent ? NAVIGATOR.userAgent : EMPTY, httpUACH = new UACHData(headers, true), regexMap = defaultRegexes, createItemFunc = function(itemType) {
+			if (itemType == RESULT) return function() {
+				return new UAItem(itemType, userAgent, regexMap, httpUACH).set("ua", userAgent).set(BROWSER, this.getBrowser()).set(CPU, this.getCPU()).set(DEVICE, this.getDevice()).set(ENGINE, this.getEngine()).set(OS, this.getOS()).get();
+			};
+			else return function() {
+				return new UAItem(itemType, userAgent, regexMap[itemType], httpUACH).parseUA().get();
+			};
+		};
+		setProps.call(this, [
+			["getBrowser", createItemFunc(BROWSER)],
+			["getCPU", createItemFunc(CPU)],
+			["getDevice", createItemFunc(DEVICE)],
+			["getEngine", createItemFunc(ENGINE)],
+			["getOS", createItemFunc(OS)],
+			["getResult", createItemFunc(RESULT)],
+			["getUA", function() {
+				return userAgent;
+			}],
+			["setUA", function(ua) {
+				if (isString(ua)) userAgent = trim(ua, UA_MAX_LENGTH);
+				return this;
+			}],
+			["useExtension", function(exts) {
+				if (exts) regexMap = extend(regexMap, exts);
+				return this;
+			}]
+		]).setUA(userAgent).useExtension(extensions);
+		return this;
+	}
+	UAParser.VERSION = LIBVERSION;
+	UAParser.BROWSER = enumerize([
+		NAME,
+		VERSION,
+		MAJOR,
+		TYPE
+	]);
+	UAParser.CPU = enumerize([ARCHITECTURE]);
+	UAParser.DEVICE = enumerize([
+		MODEL,
+		VENDOR,
+		TYPE,
+		CONSOLE,
+		MOBILE,
+		SMARTTV,
+		TABLET,
+		WEARABLE,
+		EMBEDDED
+	]);
+	UAParser.ENGINE = UAParser.OS = enumerize([NAME, VERSION]);
+	//#endregion
 	//#region src/collectEntry.js
+	var IPIFY = "https://api.ipify.org?format=json";
+	var IPAPI = (ip) => `https://ipapi.co/${ip}/json`;
+	var IPGEO = "https://api.ipgeolocation.io/ipgeo?apiKey=ceb5539b1a8e4670868cf6a0e0ff4509";
+	/** fetch().json() that resolves to {} instead of throwing. */
+	async function tryJson(url) {
+		try {
+			const res = await fetch(url);
+			if (!res.ok) return {};
+			return await res.json();
+		} catch {
+			return {};
+		}
+	}
+	/** Battery percentage, or "blocked" where the browser refuses. */
+	async function readBattery() {
+		if (!navigator.getBattery) return "blocked";
+		try {
+			const b = await navigator.getBattery();
+			return `${Math.round(100 * b.level)}%${b.charging ? " (charging)" : ""}`;
+		} catch {
+			return "blocked";
+		}
+	}
 	/**
 	* @param {(payload: object) => void} send called once with the entry payload
 	*/
-	function collectEntry(send) {
-		jQuery.getJSON("https://api.ipify.org?format=json", (data) => {
-			const ip = data.ip;
-			jQuery.getJSON(`https://ipapi.co/${ip}/json`, (geo) => {
-				const city = geo.city;
-				const country = geo.country;
-				const result = new UAParser().getResult();
-				jQuery.getJSON("https://api.ipgeolocation.io/ipgeo?apiKey=ceb5539b1a8e4670868cf6a0e0ff4509", (whoda) => {
-					const base = {
-						type: "entry",
-						ip,
-						os: `${result.os.name} ${result.os.version}`,
-						browser: `${result.browser.name} ${result.browser.version}`,
-						isp: whoda.isp,
-						location: `${city}, ${country}`,
-						device: [result.device.vendor, result.device.model].filter(Boolean).join(" "),
-						darkMode: window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "Dark" : "Light"
-					};
-					if (navigator.getBattery) navigator.getBattery().then((b) => send({
-						...base,
-						battery: `${Math.round(100 * b.level)}%${b.charging ? " (charging)" : ""}`
-					})).catch(() => send({
-						...base,
-						battery: "blocked"
-					}));
-					else send({
-						...base,
-						battery: "blocked"
-					});
-				});
-			});
+	async function collectEntry(send) {
+		const ua = new UAParser().getResult();
+		const { ip } = await tryJson(IPIFY);
+		const [geo, whoda] = await Promise.all([ip ? tryJson(IPAPI(ip)) : Promise.resolve({}), tryJson(IPGEO)]);
+		send({
+			type: "entry",
+			ip: ip || "unknown",
+			os: `${ua.os.name} ${ua.os.version}`,
+			browser: `${ua.browser.name} ${ua.browser.version}`,
+			isp: whoda.isp || "unknown",
+			location: geo.city && geo.country ? `${geo.city}, ${geo.country}` : "unknown",
+			device: [ua.device.vendor, ua.device.model].filter(Boolean).join(" "),
+			battery: await readBattery(),
+			darkMode: window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "Dark" : "Light"
 		});
 	}
 	//#endregion

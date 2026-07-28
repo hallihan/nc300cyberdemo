@@ -1,96 +1,117 @@
-// Runs the REAL built bundle inside jsdom with stubbed externals, then drives
-// it through the socket protocol and asserts on the resulting DOM. This tests
-// the shipped artifact, not a reimplementation.
+// Runs the REAL built bundle inside jsdom against a REAL Socket.IO server.
+// socket.io-client is bundled now, so there is no global `io` to stub — the
+// client opens an actual websocket to a throwaway server on a random port,
+// which also exercises same-origin URL resolution.
 //
-//   node --test test/
+//   npm test
 //
-// Requires `npm run build` first (or `npm test`, which builds).
+// External HTTP (ipify/ipapi/ipgeolocation) is stubbed to fail, so
+// collectEntry exercises its degraded path rather than hitting the network.
 
-import { test, describe, before } from 'node:test';
+import { test, describe, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { createServer } from 'node:http';
+import { Server } from 'socket.io';
 import { JSDOM } from 'jsdom';
 
 const BUNDLE = new URL('../build/bundle.js', import.meta.url).pathname;
+const BUNDLE_SRC = fs.readFileSync(BUNDLE, 'utf8');
+
+const open = [];
+afterEach(() => {
+	while (open.length) {
+		const { httpServer, window } = open.pop();
+		try { window.close(); } catch {}
+		try { httpServer.close(); } catch {}
+	}
+});
 
 /**
- * Boots the bundle in a fresh jsdom, returns handles for driving it.
- * @param {{hash?: string}} opts
+ * Boots a real socket server + the real bundle in jsdom, and waits for the
+ * client to connect.
+ * @param {{hash?: string, connect?: boolean}} opts
  */
-function boot({ hash = '' } = {}) {
-	const dom = new JSDOM(`<!doctype html><html><head></head><body></body></html>`, {
-		url: `https://example.test/${hash}`,
+async function boot({ hash = '', connect = true } = {}) {
+	const httpServer = createServer();
+	const ioServer = new Server(httpServer, { cors: { origin: '*' } });
+	await new Promise((r) => httpServer.listen(0, '127.0.0.1', r));
+	const { port } = httpServer.address();
+
+	const connected = new Promise((resolve) => ioServer.on('connection', resolve));
+
+	const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', {
+		url: `http://127.0.0.1:${port}/${hash}`,
 		runScripts: 'outside-only'
 	});
 	const { window } = dom;
+	open.push({ httpServer, window });
 
-	// --- stub the externals index.html normally supplies ---
+	// collectEntry's lookups: fail fast so the degraded path runs offline.
+	window.fetch = () => Promise.reject(new Error('offline in tests'));
+
+	window.eval(BUNDLE_SRC);
+
+	if (!connect) return { window, port, httpServer };
+
+	const serverSocket = await connected;
+
+	/** everything the client sent, split by kind */
 	const sent = [];
-	let messageHandler = null;
-	const fakeSocket = {
-		connected: false,
-		send: (raw) => sent.push(JSON.parse(raw)),
-		on(event, cb) {
-			if (event === 'message') messageHandler = cb;
-			if (event === 'connect') this._connect = cb;
-		},
-		connect() {
-			return this;
-		}
-	};
-	window.io = () => fakeSocket;
-	// collectEntry's network chain: never invoke the callbacks, so no entry is
-	// sent. The entry payload is covered separately in collectEntry coverage.
-	window.jQuery = { getJSON: () => {} };
-	window.UAParser = function () {
-		return { getResult: () => ({ os: {}, browser: {}, device: {} }) };
-	};
+	const entries = [];
+	serverSocket.on('message', (raw) => {
+		const msg = JSON.parse(raw);
+		(msg.type === 'entry' ? entries : sent).push(msg);
+	});
 
-	window.eval(fs.readFileSync(BUNDLE, 'utf8'));
-
-	// SocketClient injects the socket.io CDN <script> and inits on its load
-	// event. jsdom won't fetch it, so fire the event by hand.
-	const tag = window.document.querySelector('head script');
-	fakeSocket.connected = true;
-	tag.dispatchEvent(new window.Event('load'));
-
-	const flush = async () => {
-		await new Promise((r) => setTimeout(r, 0));
-	};
+	const flush = () => new Promise((r) => setTimeout(r, 20));
 	const recv = async (msg) => {
-		messageHandler(msg);
+		serverSocket.send(msg);
 		await flush();
 	};
 	const text = () => window.document.body.textContent.replace(/\s+/g, ' ').trim();
 	const $ = (sel) => window.document.querySelectorAll(sel);
+	const button = (label) =>
+		Array.from($('button')).find((b) => b.textContent.trim() === label);
 
-	return { window, sent, recv, flush, text, $, fakeSocket };
+	await flush();
+	return { window, serverSocket, sent, entries, recv, flush, text, $, button, port };
 }
 
 describe('connection lifecycle', () => {
-	test('shows Connecting... before the socket connects', () => {
+	test('shows Connecting... until the socket connects', async () => {
+		// no server listening on this port -> client can never connect
 		const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', {
-			url: 'https://example.test/',
+			url: 'http://127.0.0.1:1/',
 			runScripts: 'outside-only'
 		});
-		dom.window.io = () => ({ connected: false, on() {}, connect() { return this; }, send() {} });
-		dom.window.jQuery = { getJSON: () => {} };
-		dom.window.UAParser = function () { return { getResult: () => ({ os: {}, browser: {}, device: {} }) }; };
-		dom.window.eval(fs.readFileSync(BUNDLE, 'utf8'));
+		dom.window.fetch = () => Promise.reject(new Error('offline'));
+		dom.window.eval(BUNDLE_SRC);
+		open.push({ httpServer: { close() {} }, window: dom.window });
 		assert.match(dom.window.document.body.textContent, /Connecting/);
 	});
 
 	test('renders the board once connected', async () => {
-		const { $, flush } = boot();
-		await flush();
+		const { $ } = await boot();
 		assert.equal($('.board').length, 1, 'board container present');
 		assert.equal($('button.tile').length, 9, 'nine tiles');
+	});
+
+	test('sends an entry even when every lookup fails', async () => {
+		const { entries } = await boot();
+		assert.equal(entries.length, 1, 'exactly one entry');
+		const e = entries[0];
+		assert.equal(e.ip, 'unknown');
+		assert.equal(e.isp, 'unknown');
+		assert.equal(e.location, 'unknown');
+		assert.equal(e.battery, 'blocked', 'jsdom has no Battery API');
+		assert.ok(e.darkMode === 'Dark' || e.darkMode === 'Light');
 	});
 });
 
 describe('non-admin view', () => {
 	test('waits for game start, then hides the overlay when active', async () => {
-		const { recv, text } = boot();
+		const { recv, text } = await boot();
 		await recv({ type: 'status', gameActive: false });
 		assert.match(text(), /Waiting for game start/);
 		await recv({ type: 'status', gameActive: true });
@@ -98,7 +119,7 @@ describe('non-admin view', () => {
 	});
 
 	test('clicking a tile sends a vote and bumps the count optimistically', async () => {
-		const { recv, sent, $, flush } = boot();
+		const { recv, sent, $, flush } = await boot();
 		await recv({ type: 'status', gameActive: true });
 		$('button.tile')[4].click();
 		await flush();
@@ -107,14 +128,14 @@ describe('non-admin view', () => {
 	});
 
 	test('shows the opponent overlay when it is not the collective turn', async () => {
-		const { recv, text } = boot();
+		const { recv, text } = await boot();
 		await recv({ type: 'status', gameActive: true });
 		await recv({ type: 'turn', collectiveTurn: false });
 		assert.match(text(), /Waiting for opponent's turn/);
 	});
 
 	test('renders the countdown only while time > 0', async () => {
-		const { recv, text } = boot();
+		const { recv, text } = await boot();
 		await recv({ type: 'status', gameActive: true });
 		await recv({ type: 'time', time: 7 });
 		assert.match(text(), /7/);
@@ -123,7 +144,7 @@ describe('non-admin view', () => {
 	});
 
 	test('board messages render x and o icons', async () => {
-		const { recv, $ } = boot();
+		const { recv, $ } = await boot();
 		await recv({ type: 'status', gameActive: true });
 		const board = Array.from({ length: 9 }, () => ({ votes: 0, state: '' }));
 		board[0].state = 'x';
@@ -135,14 +156,14 @@ describe('non-admin view', () => {
 
 	test('result overlay maps ending codes to text', async () => {
 		for (const [code, expected] of [['x', "X's win!"], ['o', "O's win!"], ['s', 'Stalemate!']]) {
-			const { recv, text } = boot();
+			const { recv, text } = await boot();
 			await recv({ type: 'ending', ending: code });
-			assert.match(text(), new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+			assert.ok(text().includes(expected), `${code} -> ${expected}`);
 		}
 	});
 
 	test('ignores entries broadcasts when not admin', async () => {
-		const { recv, text } = boot();
+		const { recv, text } = await boot();
 		await recv({ type: 'ending', ending: 'x' });
 		await recv({ type: 'entries', entries: { '1.1.1.1': { ip: '1.1.1.1', browser: 'Chrome' } } });
 		assert.doesNotMatch(text(), /Show Info/, 'non-admin never sees the info controls');
@@ -151,16 +172,15 @@ describe('non-admin view', () => {
 
 describe('admin view (#admin)', () => {
 	test('offers Start Game and sends start', async () => {
-		const { text, sent, $, flush } = boot({ hash: '#admin' });
-		await flush();
+		const { text, sent, button, flush } = await boot({ hash: '#admin' });
 		assert.match(text(), /Start Game/);
-		Array.from($('button')).find((b) => b.textContent.includes('Start Game')).click();
+		button('Start Game').click();
 		await flush();
 		assert.deepEqual(sent.at(-1), { type: 'start' });
 	});
 
 	test('shows the three ending buttons while the game is active', async () => {
-		const { recv, text } = boot({ hash: '#admin' });
+		const { recv, text } = await boot({ hash: '#admin' });
 		await recv({ type: 'status', gameActive: true });
 		const t = text();
 		assert.match(t, /X Wins/);
@@ -169,35 +189,33 @@ describe('admin view (#admin)', () => {
 	});
 
 	test('ending buttons send the right codes', async () => {
-		const { recv, sent, $, flush } = boot({ hash: '#admin' });
+		const { recv, sent, button, flush } = await boot({ hash: '#admin' });
 		await recv({ type: 'status', gameActive: true });
 		for (const [label, code] of [['X Wins', 'x'], ['O Wins', 'o'], ['Stalemate', 's']]) {
-			Array.from($('button')).find((b) => b.textContent.trim() === label).click();
+			button(label).click();
 			await flush();
 			assert.deepEqual(sent.at(-1), { type: 'ending', ending: code });
 		}
 	});
 
 	test('admin_vote only fires when it is not the collective turn', async () => {
-		const { recv, sent, $, flush } = boot({ hash: '#admin' });
+		const { recv, sent, $, flush } = await boot({ hash: '#admin' });
 		await recv({ type: 'status', gameActive: true });
 
-		// collectiveTurn defaults true -> a tile click must send nothing
 		const before = sent.length;
 		$('button.tile')[2].click();
 		await flush();
 		assert.equal(sent.length, before, 'no message during the collective turn');
 
 		await recv({ type: 'turn', collectiveTurn: false });
-		// deliberately a different tile: tile 2 is still inside its 1s cooldown
-		// from the click above, so it is disabled and would swallow the click.
+		// a different tile: tile 2 is still inside its 1s cooldown from above
 		$('button.tile')[3].click();
 		await flush();
 		assert.deepEqual(sent.at(-1), { type: 'admin_vote', tile: 3 });
 	});
 
 	test('a clicked tile is disabled for its 1s cooldown', async () => {
-		const { recv, $, flush } = boot({ hash: '#admin' });
+		const { recv, $, flush } = await boot({ hash: '#admin' });
 		await recv({ type: 'status', gameActive: true });
 		await recv({ type: 'turn', collectiveTurn: false });
 		const tile = $('button.tile')[5];
@@ -208,9 +226,9 @@ describe('admin view (#admin)', () => {
 	});
 
 	test('a tile claimed while cooling down stays disabled', async () => {
-		// Regression guard for the bug the Svelte 5 rewrite fixed: previously
-		// the expiring 1s timer re-enabled an already-played tile.
-		const { recv, $, flush } = boot({ hash: '#admin' });
+		// Regression guard for the bug the Svelte 5 rewrite fixed: the expiring
+		// 1s timer used to re-enable an already-played tile.
+		const { recv, $, flush } = await boot({ hash: '#admin' });
 		await recv({ type: 'status', gameActive: true });
 		await recv({ type: 'turn', collectiveTurn: false });
 		$('button.tile')[6].click();
@@ -224,9 +242,9 @@ describe('admin view (#admin)', () => {
 	});
 
 	test('Restart sends restart and clears the panel', async () => {
-		const { recv, sent, $, flush, text } = boot({ hash: '#admin' });
+		const { recv, sent, button, flush, text } = await boot({ hash: '#admin' });
 		await recv({ type: 'ending', ending: 'x' });
-		Array.from($('button')).find((b) => b.textContent.trim() === 'Restart').click();
+		button('Restart').click();
 		await flush();
 		assert.deepEqual(sent.at(-1), { type: 'restart' });
 		assert.match(text(), /Show Info/, 'panel collapsed back to Show Info');
@@ -237,10 +255,10 @@ describe('info panel', () => {
 	const entriesOf = (list) => Object.fromEntries(list.map((e) => [e.ip, e]));
 
 	async function openPanel(rows) {
-		const h = boot({ hash: '#admin' });
+		const h = await boot({ hash: '#admin' });
 		await h.recv({ type: 'ending', ending: 'x' });
 		await h.recv({ type: 'entries', entries: entriesOf(rows) });
-		Array.from(h.$('button')).find((b) => b.textContent.trim() === 'Show Info').click();
+		h.button('Show Info').click();
 		await h.flush();
 		return h;
 	}
@@ -252,22 +270,24 @@ describe('info panel', () => {
 			{ ip: 'c', browser: 'Firefox 133', battery: 'blocked', os: 'Windows 10' },
 			{ ip: 'd', browser: 'Chrome 130', battery: '12%', os: 'Android 13' }
 		]);
-		const batteries = Array.from($('.info-table tbody tr')).map(
-			(tr) => tr.children[1].textContent.trim()
+		const rows = Array.from($('.info-table tbody tr'));
+		assert.deepEqual(
+			rows.map((tr) => tr.children[1].textContent.trim()),
+			['12%', '80%', 'blocked', 'blocked']
 		);
-		assert.deepEqual(batteries, ['12%', '80%', 'blocked', 'blocked']);
-		const browsers = Array.from($('.info-table tbody tr')).map(
-			(tr) => tr.children[4].textContent.trim()
+		assert.deepEqual(
+			rows.slice(2).map((tr) => tr.children[4].textContent.trim()),
+			['Firefox 133', 'Safari 17'],
+			'unknowns ordered by browser'
 		);
-		assert.deepEqual(browsers.slice(2), ['Firefox 133', 'Safari 17'], 'unknowns ordered by browser');
 	});
 
 	test('renders all eight columns', async () => {
 		const { $ } = await openPanel([{ ip: 'a', browser: 'Chrome', battery: '5%' }]);
-		const headers = Array.from($('.info-table thead th')).map((th) => th.textContent.trim());
-		assert.deepEqual(headers, [
-			'Device', 'Battery', 'Dark Mode', 'OS', 'Browser', 'IP', 'ISP', 'Location'
-		]);
+		assert.deepEqual(
+			Array.from($('.info-table thead th')).map((th) => th.textContent.trim()),
+			['Device', 'Battery', 'Dark Mode', 'OS', 'Browser', 'IP', 'ISP', 'Location']
+		);
 	});
 
 	test('does not cap the list (the old table stopped at 8)', async () => {
@@ -283,10 +303,10 @@ describe('info panel', () => {
 			{ ip: 'a', browser: 'Chrome', battery: '5%', os: 'Windows 10' },
 			{ ip: 'b', browser: 'Chrome', battery: '6%', os: 'Android 14', device: 'Pixel 8' }
 		]);
-		const devices = Array.from($('.info-table tbody tr')).map(
-			(tr) => tr.children[0].textContent.trim()
+		assert.deepEqual(
+			Array.from($('.info-table tbody tr')).map((tr) => tr.children[0].textContent.trim()),
+			['Windows PC', 'Pixel 8']
 		);
-		assert.deepEqual(devices, ['Windows PC', 'Pixel 8']);
 	});
 
 	test('device count label pluralises', async () => {
@@ -301,7 +321,7 @@ describe('info panel', () => {
 
 	test('Clear Info sends reset_entries and collapses the panel', async () => {
 		const h = await openPanel([{ ip: 'a', browser: 'Chrome', battery: '5%' }]);
-		Array.from(h.$('button')).find((b) => b.textContent.trim() === 'Clear Info').click();
+		h.button('Clear Info').click();
 		await h.flush();
 		assert.deepEqual(h.sent.at(-1), { type: 'reset_entries' });
 		assert.match(h.text(), /Show Info/);
