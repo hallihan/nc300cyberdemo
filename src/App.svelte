@@ -153,6 +153,11 @@
 					<span class="pct" class:full={tracked > 0 && voted >= tracked}>({votedPct}%)</span>
 				</span>
 			</div>
+		{:else}
+			<!-- The crowd always plays X; the admin answers as O. -->
+			<div class="you-are">
+				You are <span class="material-icons-round you-x">close</span>
+			</div>
 		{/if}
 
 		<div class="board">
@@ -279,6 +284,23 @@
 	.pct.full {
 		color: #00ff95;
 		opacity: 1;
+	}
+
+	.you-are {
+		display: flex;
+		align-items: center;
+		gap: 0.35em;
+		margin-bottom: 10px;
+		font-size: 15px;
+		color: #d8dee9;
+		letter-spacing: 0.02em;
+	}
+
+	/* same glyph and colour as the X tiles, so the mapping is unmistakable */
+	.you-x {
+		color: red;
+		font-size: 24px;
+		line-height: 1;
 	}
 
 	.board {

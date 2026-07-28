@@ -152,6 +152,24 @@ describe('identify + round stats', () => {
 		assert.equal($('.pct.full').length, 0, '0/0 must not read as complete');
 	});
 
+	test('players are told they are X', async () => {
+		const { text, $ } = await boot();
+		assert.match(text(), /You are/);
+		const mark = $('.you-x')[0];
+		assert.ok(mark, 'the X glyph is present');
+		assert.equal(mark.textContent.trim(), 'close', 'same Material icon the X tiles use');
+		assert.ok(
+			mark.className.includes('material-icons-round'),
+			'same font face as the X tiles, so the two match visually'
+		);
+	});
+
+	test('the admin is not told they are X', async () => {
+		const { text, $ } = await boot({ hash: '#admin' });
+		assert.doesNotMatch(text(), /You are/);
+		assert.equal($('.you-x').length, 0);
+	});
+
 	test('non-admin never sees the stats bar', async () => {
 		const { recv, text, $ } = await boot();
 		await recv({ type: 'stats', tracked: 12, voted: 7, entries: 9 });
