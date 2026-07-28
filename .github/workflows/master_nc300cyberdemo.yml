@@ -28,13 +28,15 @@ jobs:
           npm run test --if-present
 
       - name: 'Tar files'
-        run: tar -cvf node-app.tar .
+        run: tar --exclude='./node-app.tar' --exclude='./.git' -czf node-app.tar .
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
           name: node-app
           path: ./node-app.tar
+          # the tarball is already gzipped; re-zipping it just burns CPU
+          compression-level: 0
 
   deploy:
     runs-on: ubuntu-latest
@@ -50,7 +52,7 @@ jobs:
           name: node-app
 
       - name: 'Untar files'
-        run: tar -xvf node-app.tar
+        run: tar -xzf node-app.tar
 
       - name: 'Deploy to Azure Web App'
         id: deploy-to-webapp
