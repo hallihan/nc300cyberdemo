@@ -8,7 +8,6 @@ const { outcome } = game;
 
 /** "x..o....." -> board; '.' is empty */
 const b = (s) => [...s].map((ch) => ({ state: ch === '.' ? '' : ch, votes: 0 }));
-const marks = (board) => board.map((t) => t.state || '.').join('');
 
 /** deterministic rng returning a fixed sequence, then repeating the last value */
 const seq = (...values) => {
