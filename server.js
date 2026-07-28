@@ -6,6 +6,7 @@ const path = require('path');
 var cors = require('cors');
 const { outcome, highestTile } = require('./lib/game');
 const { chooseMove, DIFFICULTIES } = require('./lib/ai');
+const { fingerprint } = require('./lib/fingerprint');
 
 const port = process.env.PORT || 80;
 // Seconds the crowd gets to vote each round. Override to tune the demo pace.
@@ -153,7 +154,10 @@ io.on("connection", (socket) => {
         }
         if(d.type == "entry") {
             console.log(JSON.stringify(d))
-            entries[d.ip] = d
+            // Keyed by the whole fingerprint, not the IP: a classroom on one
+            // carrier NAT shares an address, and keying on it dropped everyone
+            // but the last reporter.
+            entries[fingerprint(d)] = d
             broadcast({type: "entries", entries: entries})
             sendStats()
         }

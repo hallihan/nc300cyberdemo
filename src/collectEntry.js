@@ -1,7 +1,7 @@
 import { UAParser } from 'ua-parser-js';
 
-// Gathers everything the page can learn about its visitor and hands it to
-// `send`. Uses fetch and a bundled UAParser — no jQuery, no CDN.
+// Gathers everything the page can learn about its visitor. Uses fetch and a
+// bundled UAParser — no jQuery, no CDN.
 
 const IPIFY = 'https://api.ipify.org?format=json';
 const IPAPI = (ip) => `https://ipapi.co/${ip}/json`;
@@ -30,22 +30,30 @@ async function readBattery() {
 }
 
 /**
- * @param {(payload: object) => void} send called once with the entry payload
+ * Reports this device once, then hands back a function to report it again.
+ * Everything except battery is gathered once and reused — the network lookups
+ * are slow and their answers don't change — so repeat reports only re-read the
+ * battery level.
+ *
+ * The server keys entries on a hash of every field except battery, so repeat
+ * reports update the same row rather than creating new ones.
+ *
+ * @param {(payload: object) => void} send
+ * @returns {Promise<() => Promise<void>>} call to report again
  */
-export async function collectEntry(send) {
+export async function startEntryReporting(send) {
 	const ua = new UAParser().getResult();
 
-	// Each lookup degrades independently. The old jQuery chain was nested, so
-	// one failing request meant no entry was sent at all — with a classroom
-	// hitting these free APIs at once, a rate-limited response would have
-	// dropped students from the table entirely.
+	// Each lookup degrades independently. The old nested chain meant one failed
+	// request sent no entry at all — with a classroom hitting these free APIs
+	// at once, a rate-limited response would have dropped students entirely.
 	const { ip } = await tryJson(IPIFY);
 	const [geo, whoda] = await Promise.all([
 		ip ? tryJson(IPAPI(ip)) : Promise.resolve({}),
 		tryJson(IPGEO)
 	]);
 
-	send({
+	const base = {
 		type: 'entry',
 		ip: ip || 'unknown',
 		os: `${ua.os.name} ${ua.os.version}`,
@@ -53,10 +61,13 @@ export async function collectEntry(send) {
 		isp: whoda.isp || 'unknown',
 		location: geo.city && geo.country ? `${geo.city}, ${geo.country}` : 'unknown',
 		device: [ua.device.vendor, ua.device.model].filter(Boolean).join(' '),
-		battery: await readBattery(),
 		darkMode:
 			window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
 				? 'Dark'
 				: 'Light'
-	});
+	};
+
+	const report = async () => send({ ...base, battery: await readBattery() });
+	await report();
+	return report;
 }

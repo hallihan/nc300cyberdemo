@@ -120,6 +120,49 @@ describe('tracked users', () => {
 		assert.equal(admin.last('stats').tracked, 0);
 	});
 
+	test('two devices on one IP are kept as separate rows', async () => {
+		const ctx = await startServer();
+		const admin = await connect(ctx, { admin: true });
+		const a = await connect(ctx);
+		const b = await connect(ctx);
+
+		const shared = { ip: '203.0.113.50', isp: 'T-Mobile', location: 'Portland, US' };
+		a.send({ type: 'entry', ...shared, os: 'iOS 17.5', browser: 'Safari 17', device: 'Apple iPhone', battery: 'blocked', darkMode: 'Dark' });
+		b.send({ type: 'entry', ...shared, os: 'Android 15', browser: 'Chrome 131', device: 'Google Pixel 8', battery: '40%', darkMode: 'Light' });
+		await settle();
+
+		assert.equal(admin.last('stats').entries, 2, 'both survive despite sharing an address');
+		const rows = Object.values(admin.last('entries').entries);
+		assert.deepEqual(
+			rows.map((r) => r.device).sort(),
+			['Apple iPhone', 'Google Pixel 8']
+		);
+	});
+
+	test('the same device reporting again updates its row rather than adding one', async () => {
+		const ctx = await startServer();
+		const admin = await connect(ctx, { admin: true });
+		const player = await connect(ctx);
+
+		const device = {
+			type: 'entry', ip: '203.0.113.60', os: 'Android 15', browser: 'Chrome 131',
+			isp: 'Verizon', location: 'Portland, US', device: 'Google Pixel 8', darkMode: 'Dark'
+		};
+		player.send({ ...device, battery: '80%' });
+		await settle();
+		assert.equal(admin.last('stats').entries, 1);
+
+		// battery drains — same device, must not create a second row
+		player.send({ ...device, battery: '12%' });
+		await settle();
+		assert.equal(admin.last('stats').entries, 1, 'still one row');
+		assert.equal(
+			Object.values(admin.last('entries').entries)[0].battery,
+			'12%',
+			'and the row shows the fresh reading'
+		);
+	});
+
 	test('reports how many devices have been captured', async () => {
 		const ctx = await startServer();
 		const admin = await connect(ctx, { admin: true });

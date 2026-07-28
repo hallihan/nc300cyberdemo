@@ -2,7 +2,7 @@
 	import Tile from './tile.svelte';
 	import SocketClient from './SocketClient.svelte';
 	import InfoPanel from './InfoPanel.svelte';
-	import { collectEntry } from './collectEntry.js';
+	import { startEntryReporting } from './collectEntry.js';
 
 	console.table(document);
 
@@ -32,6 +32,8 @@
 	let thinking = $state(false);
 
 	let socket;
+	// Set once the first entry report lands; called again on each vote.
+	let reportEntry;
 
 	// Read once at load. There is deliberately no hashchange listener, so
 	// adding #admin to an open page requires a reload.
@@ -59,7 +61,11 @@
 		// own connection is excluded from the tracked-user count.
 		sock.send(JSON.stringify({ type: 'identify', admin }));
 
-		collectEntry((payload) => sock.send(JSON.stringify(payload)));
+		startEntryReporting((payload) => sock.send(JSON.stringify(payload)))
+			.then((again) => {
+				reportEntry = again;
+			})
+			.catch(() => {});
 
 		sock.on('error', () => {
 			console.log('error');
@@ -88,6 +94,10 @@
 		if (admin) return;
 		send({ type: 'vote', tile: i });
 		board[i].votes++; // optimistic; corrected by the next board broadcast
+		// Refresh this device's row — keeps battery current and re-asserts
+		// presence. The server dedups on everything but battery, so this
+		// updates the existing row rather than adding one.
+		reportEntry?.();
 	};
 
 	const restart = () => {

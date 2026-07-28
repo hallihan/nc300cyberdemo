@@ -117,6 +117,22 @@ describe('connection lifecycle', () => {
 });
 
 describe('identify + round stats', () => {
+	test('voting re-reports the device, keeping its row fresh', async () => {
+		const { recv, entries, $, flush } = await boot();
+		await recv({ type: 'status', gameActive: true });
+		assert.equal(entries.length, 1, 'one report on load');
+
+		$('button.tile')[0].click();
+		await flush();
+		await flush();
+		assert.equal(entries.length, 2, 'and another on the vote');
+
+		// identical except battery, so the server folds them into one row
+		const { battery: _b1, ...first } = entries[0];
+		const { battery: _b2, ...second } = entries[1];
+		assert.deepEqual(second, first, 'same fingerprint fields');
+	});
+
 	test('a normal client identifies itself as non-admin', async () => {
 		const { sent } = await boot();
 		assert.deepEqual(sent[0], { type: 'identify', admin: false });
