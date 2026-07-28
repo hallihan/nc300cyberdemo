@@ -15,6 +15,9 @@ export default defineConfig({
     cssCodeSplit: false,
     // keep the output readable: students are expected to "view source" here
     minify: false,
+    // the old bundle's sourcemap is how the original sources were recovered;
+    // keep emitting one so that remains possible
+    sourcemap: true,
     rollupOptions: {
       input: 'src/main.js',
       output: {

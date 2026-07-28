@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "vite build && node --test test/*.test.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -15,6 +16,7 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "jsdom": "^29.1.1",
     "socket.io-client": "^4.1.2",
     "svelte": "^5.56.8",
     "vite": "^8.1.5"
