@@ -134,7 +134,7 @@ describe('identify + round stats', () => {
 		assert.match(t, /Tracked users 12/);
 		assert.match(t, /Voted this round 7\/12/);
 		assert.match(t, /\(58%\)/, '7/12 rounds to 58%');
-		assert.match(t, /Devices captured 9/);
+		assert.match(t, /Current Players 9/);
 	});
 
 	test('the percentage is highlighted at 100%', async () => {

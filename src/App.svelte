@@ -157,7 +157,7 @@
 					<span class="pct" class:full={tracked > 0 && voted >= tracked}>({votedPct}%)</span>
 				</span>
 				<span class="sep">·</span>
-				<span>Devices captured <strong>{entryCount}</strong></span>
+				<span>Current Players <strong>{entryCount}</strong></span>
 			</div>
 		{/if}
 
