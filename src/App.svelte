@@ -28,6 +28,7 @@
 	// Round/tracking stats, pushed by the server.
 	let tracked = $state(0);
 	let voted = $state(0);
+	let thinking = $state(false);
 
 	let socket;
 
@@ -43,8 +44,8 @@
 
 	const send = (payload) => socket.send(JSON.stringify(payload));
 
-	const startGame = () => {
-		if (admin) send({ type: 'start' });
+	const startGame = (level) => {
+		if (admin) send({ type: 'start', difficulty: level });
 	};
 
 	const socketLoad = (sock) => {
@@ -74,17 +75,15 @@
 				tracked = res.tracked;
 				voted = res.voted;
 			}
+			if (res.type == 'thinking') thinking = res.thinking;
 		});
 	};
 
+	// The computer plays O now, so the admin only spectates the board.
 	const onTileVote = (i) => {
-		if (!admin) {
-			send({ type: 'vote', tile: i });
-			board[i].votes++; // optimistic; corrected by the next board broadcast
-		}
-		if (admin && !collectiveTurn) {
-			send({ type: 'admin_vote', tile: i });
-		}
+		if (admin) return;
+		send({ type: 'vote', tile: i });
+		board[i].votes++; // optimistic; corrected by the next board broadcast
 	};
 
 	const restart = () => {
@@ -106,16 +105,16 @@
 			{#if !admin}
 				<div class="noactive">Waiting for game start...</div>
 			{:else}
-				<div class="noactive"><button class="button-p" onclick={startGame}>Start Game</button></div>
+				<div class="noactive start-menu">
+					<button class="button-p" onclick={() => startGame('easy')}>Start Easy</button>
+					<button class="button-p" onclick={() => startGame('medium')}>Start Medium</button>
+					<button class="button-p" onclick={() => startGame('hard')}>Start Difficult</button>
+				</div>
 			{/if}
 		{/if}
 
 		{#if time > 0}
 			{time}
-		{/if}
-
-		{#if !collectiveTurn && !admin && !ending}
-			<div class="noactive">Waiting for opponent's turn...</div>
 		{/if}
 
 		{#if ending != ''}
@@ -146,7 +145,16 @@
 			{/if}
 		{/if}
 
-		{#if admin}
+		<!-- One shared strip above the board. While the computer thinks, everyone
+		     sees the same indicator — the admin screen is projected, so the two
+		     views must read identically. Nothing is greyed out; the board stays
+		     visible throughout. -->
+		{#if thinking && ending == ''}
+			<div class="thinking">
+				<span>Computer is thinking</span>
+				<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+			</div>
+		{:else if admin}
 			<div class="stats">
 				<span>
 					Voted this round <strong>{voted}</strong>/{tracked}
@@ -154,7 +162,7 @@
 				</span>
 			</div>
 		{:else}
-			<!-- The crowd always plays X; the admin answers as O. -->
+			<!-- The crowd always plays X; the computer answers as O. -->
 			<div class="you-are">
 				You are <span class="material-icons-round you-x">close</span>
 			</div>
@@ -284,6 +292,65 @@
 	.pct.full {
 		color: #00ff95;
 		opacity: 1;
+	}
+
+	.start-menu {
+		gap: 0.4em;
+		flex-wrap: wrap;
+		font-size: 0.6em;
+	}
+
+	/* Identical on the projected admin screen and on every phone. */
+	.thinking {
+		display: flex;
+		align-items: center;
+		gap: 0.5em;
+		margin-bottom: 10px;
+		font-size: 15px;
+		color: #00ff95;
+		letter-spacing: 0.02em;
+	}
+
+	.dots {
+		display: inline-flex;
+		align-items: center;
+	}
+
+	.dots i {
+		width: 0.4em;
+		height: 0.4em;
+		margin: 0 0.1em;
+		border-radius: 50%;
+		background: currentColor;
+		animation: pulse 1.4s infinite ease-in-out both;
+	}
+
+	.dots i:nth-child(1) {
+		animation-delay: -0.32s;
+	}
+
+	.dots i:nth-child(2) {
+		animation-delay: -0.16s;
+	}
+
+	@keyframes pulse {
+		0%,
+		80%,
+		100% {
+			opacity: 0.25;
+			transform: scale(0.75);
+		}
+		40% {
+			opacity: 1;
+			transform: scale(1);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.dots i {
+			animation: none;
+			opacity: 0.7;
+		}
 	}
 
 	.you-are {

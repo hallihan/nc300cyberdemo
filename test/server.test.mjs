@@ -1,7 +1,6 @@
 // Integration tests against the real server.js, driven by real socket.io
-// clients. Covers the wiring that unit tests can't: that the vote path counts
-// unique voters, that 100% skips the countdown, and that the server declares
-// the result itself.
+// clients. Covers the wiring unit tests can't: unique-voter counting, the skip
+// floor, stale-player pruning, and the computer opponent taking its own turn.
 
 import { test, describe, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,15 +17,16 @@ afterEach(() => {
 });
 
 /** Boots server.js on a random port and waits for it to listen. */
-async function startServer({ roundSeconds } = {}) {
+async function startServer({ roundSeconds = 1, computerDelayMs = 60, minPlayers } = {}) {
 	const port = 20000 + Math.floor(Math.random() * 20000);
 	const proc = spawn('node', ['server.js'], {
 		cwd: new URL('..', import.meta.url).pathname,
 		env: {
 			...process.env,
 			PORT: String(port),
-			// Tests that need a round to time out set this so they don't wait 10s.
-			...(roundSeconds ? { ROUND_SECONDS: String(roundSeconds) } : {})
+			ROUND_SECONDS: String(roundSeconds),
+			COMPUTER_DELAY_MS: String(computerDelayMs),
+			...(minPlayers ? { MIN_PLAYERS_FOR_SKIP: String(minPlayers) } : {})
 		},
 		stdio: ['ignore', 'pipe', 'pipe']
 	});
@@ -45,12 +45,8 @@ async function startServer({ roundSeconds } = {}) {
 	return entry;
 }
 
-/** Connects a client, identifies it, and records every message it receives. */
 async function connect(ctx, { admin = false } = {}) {
-	const sock = io(`http://127.0.0.1:${ctx.port}`, {
-		transports: ['websocket'],
-		forceNew: true
-	});
+	const sock = io(`http://127.0.0.1:${ctx.port}`, { transports: ['websocket'], forceNew: true });
 	ctx.sockets.push(sock);
 	const received = [];
 	sock.on('message', (m) => received.push(m));
@@ -70,18 +66,30 @@ async function connect(ctx, { admin = false } = {}) {
 
 const settle = () => new Promise((r) => setTimeout(r, 150));
 
-/**
- * Polls until `fn` returns something truthy. Board updates are only flushed on
- * the server's 1s dirty tick, so they can't be awaited with a fixed settle.
- */
-async function waitFor(fn, label = 'condition', ms = 4000) {
+/** Board updates only flush on the server's 1s dirty tick, so poll. */
+async function waitFor(fn, label = 'condition', ms = 6000) {
 	const started = Date.now();
 	while (Date.now() - started < ms) {
 		const value = fn();
 		if (value) return value;
-		await new Promise((r) => setTimeout(r, 50));
+		await new Promise((r) => setTimeout(r, 25));
 	}
 	throw new Error(`timed out waiting for ${label}`);
+}
+
+const ended = (admin) => Boolean(admin.last('ending')?.ending);
+
+/** Waits for the crowd's turn to close and the computer to answer. */
+async function awaitComputerReply(admin) {
+	await waitFor(
+		() => admin.last('turn')?.collectiveTurn === false || ended(admin),
+		'the crowd turn to resolve'
+	);
+	if (ended(admin)) return;
+	await waitFor(
+		() => admin.last('turn')?.collectiveTurn === true || ended(admin),
+		'the computer to play'
+	);
 }
 
 describe('tracked users', () => {
@@ -122,13 +130,15 @@ describe('tracked users', () => {
 	});
 });
 
-describe('unique voters per round', () => {
+describe('unique voters and the skip floor', () => {
 	test('repeated votes from one player count once', async () => {
-		const ctx = await startServer();
+		// long round: the count must not be reset by the timer mid-test
+		const ctx = await startServer({ roundSeconds: 30 });
 		const admin = await connect(ctx, { admin: true });
 		const a = await connect(ctx);
-		await connect(ctx); // a second player, so one voter is not yet 100%
-		admin.send({ type: 'start' });
+		await connect(ctx);
+		await connect(ctx);
+		admin.send({ type: 'start', difficulty: 'hard' });
 		await settle();
 
 		a.send({ type: 'vote', tile: 0 });
@@ -141,134 +151,233 @@ describe('unique voters per round', () => {
 		assert.equal(admin.last('stats').voted, 1, 'same player still counts once');
 	});
 
-	test('reaching 100% resolves the round without waiting for the timer', async () => {
-		const ctx = await startServer();
+	test('reaching 100% with enough players skips the countdown', async () => {
+		const ctx = await startServer({ roundSeconds: 30 });
+		const admin = await connect(ctx, { admin: true });
+		const players = [await connect(ctx), await connect(ctx), await connect(ctx)];
+		admin.send({ type: 'start', difficulty: 'hard' });
+		await settle();
+
+		const started = Date.now();
+		players.forEach((p) => p.send({ type: 'vote', tile: 4 }));
+		await waitFor(() => admin.last('turn')?.collectiveTurn === false, 'the skip');
+
+		// the countdown was 30s, so this can only have come from the skip
+		assert.ok(Date.now() - started < 3000, 'resolved on turnout, not the clock');
+	});
+
+	test('below the floor, full turnout does NOT skip', async () => {
+		// two players both vote: 100% turnout, but under the floor of three
+		const ctx = await startServer({ roundSeconds: 30 });
 		const admin = await connect(ctx, { admin: true });
 		const a = await connect(ctx);
 		const b = await connect(ctx);
-		admin.send({ type: 'start' });
+		admin.send({ type: 'start', difficulty: 'hard' });
 		await settle();
 
-		a.send({ type: 'vote', tile: 4 });
-		await settle();
-		assert.equal(admin.last('turn').collectiveTurn, true, 'still the crowd turn at 50%');
-
-		const started = Date.now();
-		b.send({ type: 'vote', tile: 4 });
+		a.send({ type: 'vote', tile: 0 });
+		b.send({ type: 'vote', tile: 0 });
 		await settle();
 
-		// The countdown is 10s; resolving here proves the skip fired.
-		assert.ok(Date.now() - started < 2000, 'resolved immediately, not on the timer');
-		assert.equal(admin.last('turn').collectiveTurn, false, 'handed over to the admin');
-		assert.equal(admin.last('board').board[4].state, 'x', 'most-voted tile claimed');
+		const stats = admin.last('stats');
+		assert.equal(stats.voted, 2);
+		assert.equal(stats.tracked, 2);
+		assert.equal(
+			admin.last('turn').collectiveTurn,
+			true,
+			'2/2 is 100% but below the floor, so the round stays open'
+		);
+	});
+
+	test('the floor is configurable', async () => {
+		const ctx = await startServer({ roundSeconds: 30, minPlayers: 2 });
+		const admin = await connect(ctx, { admin: true });
+		const a = await connect(ctx);
+		const b = await connect(ctx);
+		admin.send({ type: 'start', difficulty: 'hard' });
+		await settle();
+
+		a.send({ type: 'vote', tile: 0 });
+		b.send({ type: 'vote', tile: 0 });
+		await waitFor(() => admin.last('turn')?.collectiveTurn === false, 'the skip at a floor of 2');
 	});
 
 	test('spamming votes never ends the round early for everyone else', async () => {
-		const ctx = await startServer();
+		const ctx = await startServer({ roundSeconds: 30 });
 		const admin = await connect(ctx, { admin: true });
 		const spammer = await connect(ctx);
-		const quiet = await connect(ctx); // has not voted yet
-		admin.send({ type: 'start' });
+		await connect(ctx);
+		const quiet = await connect(ctx);
+		admin.send({ type: 'start', difficulty: 'hard' });
 		await settle();
 
 		for (let n = 0; n < 15; n++) spammer.send({ type: 'vote', tile: 0 });
 		await settle();
 
 		assert.equal(admin.last('stats').voted, 1, 'one voter however many clicks');
-		assert.equal(
-			admin.last('turn').collectiveTurn,
-			true,
-			'round must stay open while a player has not voted'
-		);
-		const board = await waitFor(() => admin.last('board'), 'a board broadcast');
-		assert.ok(
-			board.board[0].votes > 1,
-			'the tile total did run up — only the early close is protected'
+		assert.equal(admin.last('turn').collectiveTurn, true, 'round stays open');
+
+		// `start` broadcasts an empty board immediately, so wait for the later
+		// dirty-tick broadcast that actually carries the votes.
+		await waitFor(
+			() => (admin.last('board')?.board[0].votes ?? 0) > 1,
+			'a board carrying the spammed votes'
 		);
 
-		// the quiet player finally votes -> now everyone has had a turn
 		quiet.send({ type: 'vote', tile: 4 });
 		await settle();
-		assert.equal(admin.last('turn').collectiveTurn, false, 'now it resolves');
+		assert.equal(admin.last('turn').collectiveTurn, true, 'still one player short');
 	});
 
-	test('a spammer cannot resolve a round alone by out-voting the board', async () => {
+	test('the voted count resets once the computer has replied', async () => {
 		const ctx = await startServer();
 		const admin = await connect(ctx, { admin: true });
-		const spammer = await connect(ctx);
+		const players = [await connect(ctx), await connect(ctx), await connect(ctx)];
+		admin.send({ type: 'start', difficulty: 'hard' });
+		await settle();
+
+		players.forEach((p) => p.send({ type: 'vote', tile: 0 }));
+		await awaitComputerReply(admin);
+		assert.equal(admin.last('stats').voted, 0, 'fresh round starts at zero');
+	});
+});
+
+describe('the computer opponent', () => {
+	test('announces that it is thinking, then plays an O', async () => {
+		const ctx = await startServer({ computerDelayMs: 400 });
+		const admin = await connect(ctx, { admin: true });
+		const players = [await connect(ctx), await connect(ctx), await connect(ctx)];
+		admin.send({ type: 'start', difficulty: 'hard' });
+		await settle();
+
+		players.forEach((p) => p.send({ type: 'vote', tile: 0 }));
+
+		await waitFor(() => admin.last('thinking')?.thinking === true, 'the thinking flag');
+		assert.equal(
+			admin.last('board').board.filter((t) => t.state === 'o').length,
+			0,
+			'no move played while still thinking'
+		);
+
+		await waitFor(() => admin.last('thinking')?.thinking === false, 'thinking to finish');
+		const board = await waitFor(
+			() => admin.last('board')?.board.some((t) => t.state === 'o') && admin.last('board'),
+			'the computer move'
+		);
+		assert.equal(board.board.filter((t) => t.state === 'o').length, 1, 'exactly one O');
+	});
+
+	test('players see the thinking flag too, not just the admin', async () => {
+		const ctx = await startServer({ computerDelayMs: 400 });
+		const admin = await connect(ctx, { admin: true });
+		const players = [await connect(ctx), await connect(ctx), await connect(ctx)];
+		admin.send({ type: 'start', difficulty: 'hard' });
+		await settle();
+
+		players.forEach((p) => p.send({ type: 'vote', tile: 0 }));
+		await waitFor(() => players[0].last('thinking')?.thinking === true, 'player thinking flag');
+	});
+
+	test('hard never loses a full game', async () => {
+		const ctx = await startServer();
+		const admin = await connect(ctx, { admin: true });
+		const players = [await connect(ctx), await connect(ctx), await connect(ctx)];
+		admin.send({ type: 'start', difficulty: 'hard' });
+		await settle();
+
+		for (let round = 0; round < 6 && !ended(admin); round++) {
+			const board = (await waitFor(() => admin.last('board'), 'a board')).board;
+			const tile = board.findIndex((t) => t.state !== 'x' && t.state !== 'o');
+			if (tile < 0) break;
+			players.forEach((p) => p.send({ type: 'vote', tile }));
+			await awaitComputerReply(admin);
+		}
+
+		const result = await waitFor(() => admin.last('ending')?.ending, 'the game to end');
+		assert.notEqual(result, 'x', 'the crowd must never beat hard');
+		assert.ok(['o', 's'].includes(result), `unexpected ending ${result}`);
+	});
+
+	test('the difficulty chosen is reported back in status', async () => {
+		const ctx = await startServer();
+		const admin = await connect(ctx, { admin: true });
 		await connect(ctx);
-		await connect(ctx); // three tracked players, only one votes
-		admin.send({ type: 'start' });
+		admin.send({ type: 'start', difficulty: 'easy' });
 		await settle();
+		assert.equal(admin.last('status').difficulty, 'easy');
 
-		for (let n = 0; n < 30; n++) spammer.send({ type: 'vote', tile: n % 9 });
+		admin.send({ type: 'start', difficulty: 'medium' });
 		await settle();
-
-		const stats = admin.last('stats');
-		assert.equal(stats.voted, 1);
-		assert.equal(stats.tracked, 3);
-		assert.equal(admin.last('turn').collectiveTurn, true, 'still open at 1/3');
+		assert.equal(admin.last('status').difficulty, 'medium');
 	});
 
-	test('the voted count resets for the next round', async () => {
+	test('an unknown difficulty falls back to hard', async () => {
 		const ctx = await startServer();
 		const admin = await connect(ctx, { admin: true });
-		const a = await connect(ctx);
-		admin.send({ type: 'start' });
+		await connect(ctx);
+		admin.send({ type: 'start', difficulty: 'trivial' });
+		await settle();
+		assert.equal(admin.last('status').difficulty, 'hard');
+	});
+});
+
+describe('admin-only controls', () => {
+	// Not a security boundary — `identify` is self-asserted, so a student can
+	// still claim admin. This only keeps the intended game flow correct.
+	test('a player cannot start a game or choose the difficulty', async () => {
+		const ctx = await startServer();
+		const admin = await connect(ctx, { admin: true });
+		const player = await connect(ctx);
 		await settle();
 
-		a.send({ type: 'vote', tile: 0 }); // 1/1 -> resolves
+		player.send({ type: 'start', difficulty: 'easy' });
 		await settle();
-		assert.equal(admin.last('stats').voted, 0, 'reset after the round resolved');
+		assert.equal(admin.last('status').gameActive, false, 'game did not start');
+	});
 
-		admin.send({ type: 'admin_vote', tile: 8 });
+	test('a player cannot end or restart the game', async () => {
+		const ctx = await startServer();
+		const admin = await connect(ctx, { admin: true });
+		const player = await connect(ctx);
+		admin.send({ type: 'start', difficulty: 'hard' });
 		await settle();
-		assert.equal(admin.last('stats').voted, 0, 'still zero at the start of the new round');
+
+		player.send({ type: 'ending', ending: 'x' });
+		await settle();
+		assert.equal(admin.last('ending').ending, '', 'ending ignored from a player');
+
+		player.send({ type: 'restart' });
+		await settle();
+		assert.equal(admin.last('status').gameActive, true, 'restart ignored from a player');
 	});
 });
 
 describe('stale players', () => {
-	// These let a round expire on the timer, which is the only path that prunes.
-	const opts = { roundSeconds: 1 };
-
 	test('a player who sits out a round stops counting in the next one', async () => {
-		const ctx = await startServer(opts);
+		const ctx = await startServer();
 		const admin = await connect(ctx, { admin: true });
 		const keen = await connect(ctx);
 		await connect(ctx); // never votes
-		admin.send({ type: 'start' });
+		admin.send({ type: 'start', difficulty: 'hard' });
 		await settle();
 		assert.equal(admin.last('stats').tracked, 2, 'both players start engaged');
 
-		// Round 1 expires on the timer with only `keen` voting.
 		keen.send({ type: 'vote', tile: 0 });
-		await waitFor(() => admin.last('turn')?.collectiveTurn === false, 'round 1 to resolve');
+		await awaitComputerReply(admin);
 
-		// Round 2: the idler has been dropped.
-		admin.send({ type: 'admin_vote', tile: 8 });
-		await settle();
 		assert.equal(admin.last('stats').tracked, 1, 'idler no longer holds up the round');
-
-		// So one vote is now 100% and resolves immediately.
-		const started = Date.now();
-		keen.send({ type: 'vote', tile: 1 });
-		await settle();
-		assert.equal(admin.last('turn').collectiveTurn, false);
-		assert.ok(Date.now() - started < 900, 'resolved on the vote, not the 1s timer');
 	});
 
 	test('voting again re-engages a dropped player', async () => {
-		const ctx = await startServer(opts);
+		const ctx = await startServer();
 		const admin = await connect(ctx, { admin: true });
 		const keen = await connect(ctx);
 		const returner = await connect(ctx);
-		admin.send({ type: 'start' });
+		admin.send({ type: 'start', difficulty: 'hard' });
 		await settle();
 
 		keen.send({ type: 'vote', tile: 0 });
-		await waitFor(() => admin.last('turn')?.collectiveTurn === false, 'round 1 to resolve');
-		admin.send({ type: 'admin_vote', tile: 8 });
-		await settle();
+		await awaitComputerReply(admin);
 		assert.equal(admin.last('stats').tracked, 1, 'returner was dropped');
 
 		returner.send({ type: 'vote', tile: 2 });
@@ -276,37 +385,30 @@ describe('stale players', () => {
 		const stats = admin.last('stats');
 		assert.equal(stats.tracked, 2, 'voting puts them back in the count');
 		assert.equal(stats.voted, 1, 'and counts their vote');
-		assert.equal(admin.last('turn').collectiveTurn, true, 'round stays open for keen');
 	});
 
 	test('a new game re-engages everyone', async () => {
-		const ctx = await startServer(opts);
+		const ctx = await startServer();
 		const admin = await connect(ctx, { admin: true });
 		const keen = await connect(ctx);
-		await connect(ctx); // idles all game
-		admin.send({ type: 'start' });
+		await connect(ctx); // idles
+		admin.send({ type: 'start', difficulty: 'hard' });
 		await settle();
 
 		keen.send({ type: 'vote', tile: 0 });
-		await waitFor(() => admin.last('turn')?.collectiveTurn === false, 'round 1 to resolve');
-		admin.send({ type: 'admin_vote', tile: 8 });
-		await settle();
+		await awaitComputerReply(admin);
 		assert.equal(admin.last('stats').tracked, 1, 'idler dropped mid-game');
 
 		admin.send({ type: 'restart' });
 		await settle();
 		assert.equal(admin.last('stats').tracked, 2, 'restart gives everyone a clean slate');
-
-		admin.send({ type: 'start' });
-		await settle();
-		assert.equal(admin.last('stats').tracked, 2, 'and so does start');
 	});
 
 	test('a player joining mid-game is given a round of grace', async () => {
-		const ctx = await startServer(opts);
+		const ctx = await startServer();
 		const admin = await connect(ctx, { admin: true });
 		const keen = await connect(ctx);
-		admin.send({ type: 'start' });
+		admin.send({ type: 'start', difficulty: 'hard' });
 		await settle();
 		assert.equal(admin.last('stats').tracked, 1);
 
@@ -314,72 +416,18 @@ describe('stale players', () => {
 		await settle();
 		assert.equal(admin.last('stats').tracked, 2, 'newcomer counts immediately');
 
-		// and is dropped only after actually sitting a round out
 		keen.send({ type: 'vote', tile: 0 });
-		await waitFor(() => admin.last('turn')?.collectiveTurn === false, 'round to resolve');
-		admin.send({ type: 'admin_vote', tile: 8 });
-		await settle();
+		await awaitComputerReply(admin);
 		assert.equal(admin.last('stats').tracked, 1, 'dropped after idling one full round');
 	});
 });
 
-describe('server-side result detection', () => {
-	test('declares X the winner on three in a row', async () => {
-		const ctx = await startServer();
-		const admin = await connect(ctx, { admin: true });
-		const player = await connect(ctx);
-		admin.send({ type: 'start' });
-		await settle();
-
-		// One player => every vote is 100%, so each round resolves at once.
-		// Crowd takes 0,1,2 (top row); admin answers in the bottom row.
-		player.send({ type: 'vote', tile: 0 });
-		await settle();
-		admin.send({ type: 'admin_vote', tile: 6 });
-		await settle();
-
-		player.send({ type: 'vote', tile: 1 });
-		await settle();
-		admin.send({ type: 'admin_vote', tile: 7 });
-		await settle();
-
-		player.send({ type: 'vote', tile: 2 });
-		await settle();
-
-		assert.equal(admin.last('ending').ending, 'x', 'server declared X without being told');
-	});
-
-	test('declares O the winner when the admin completes a line', async () => {
-		const ctx = await startServer();
-		const admin = await connect(ctx, { admin: true });
-		const player = await connect(ctx);
-		admin.send({ type: 'start' });
-		await settle();
-
-		// Crowd takes 0,1 then 3; admin takes the 6,7,8 row.
-		player.send({ type: 'vote', tile: 0 });
-		await settle();
-		admin.send({ type: 'admin_vote', tile: 6 });
-		await settle();
-
-		player.send({ type: 'vote', tile: 1 });
-		await settle();
-		admin.send({ type: 'admin_vote', tile: 7 });
-		await settle();
-
-		player.send({ type: 'vote', tile: 3 });
-		await settle();
-		admin.send({ type: 'admin_vote', tile: 8 });
-		await settle();
-
-		assert.equal(admin.last('ending').ending, 'o');
-	});
-
+describe('result detection', () => {
 	test('the manual override buttons still work', async () => {
 		const ctx = await startServer();
 		const admin = await connect(ctx, { admin: true });
 		await connect(ctx);
-		admin.send({ type: 'start' });
+		admin.send({ type: 'start', difficulty: 'hard' });
 		await settle();
 
 		admin.send({ type: 'ending', ending: 's' });
@@ -391,7 +439,7 @@ describe('server-side result detection', () => {
 		const ctx = await startServer();
 		const admin = await connect(ctx, { admin: true });
 		await connect(ctx);
-		admin.send({ type: 'start' });
+		admin.send({ type: 'start', difficulty: 'hard' });
 		await settle();
 		admin.send({ type: 'ending', ending: 'x' });
 		await settle();
@@ -403,6 +451,28 @@ describe('server-side result detection', () => {
 		assert.ok(
 			admin.last('board').board.every((t) => t.state === '' && t.votes === 0),
 			'board fully cleared'
+		);
+	});
+
+	test('a restart cancels a pending computer move', async () => {
+		const ctx = await startServer({ computerDelayMs: 1500 });
+		const admin = await connect(ctx, { admin: true });
+		const players = [await connect(ctx), await connect(ctx), await connect(ctx)];
+		admin.send({ type: 'start', difficulty: 'hard' });
+		await settle();
+
+		players.forEach((p) => p.send({ type: 'vote', tile: 0 }));
+		await waitFor(() => admin.last('thinking')?.thinking === true, 'thinking to begin');
+
+		admin.send({ type: 'restart' });
+		await settle();
+		assert.equal(admin.last('thinking').thinking, false, 'thinking cleared');
+
+		// wait past the original delay: the stale move must not land
+		await new Promise((r) => setTimeout(r, 1800));
+		assert.ok(
+			admin.last('board').board.every((t) => t.state === ''),
+			'no O appeared on the restarted board'
 		);
 	});
 });

@@ -196,11 +196,36 @@ describe('non-admin view', () => {
 		assert.match($('button.tile')[4].textContent, /1/, 'optimistic increment rendered');
 	});
 
-	test('shows the opponent overlay when it is not the collective turn', async () => {
+	test('shows the thinking indicator without greying out the board', async () => {
+		const { recv, text, $ } = await boot();
+		await recv({ type: 'status', gameActive: true });
+		await recv({ type: 'thinking', thinking: true });
+
+		assert.match(text(), /Computer is thinking/);
+		assert.equal($('.thinking').length, 1);
+		assert.equal($('.dots i').length, 3, 'animated dots present');
+		// the admin screen is projected, so nothing may be covered or dimmed
+		assert.equal($('.noactive').length, 0, 'no full-screen overlay');
+		assert.equal($('button.tile').length, 9, 'board stays visible');
+	});
+
+	test('the thinking indicator is identical for the admin', async () => {
+		const { recv, text, $ } = await boot({ hash: '#admin' });
+		await recv({ type: 'status', gameActive: true });
+		await recv({ type: 'thinking', thinking: true });
+		assert.match(text(), /Computer is thinking/);
+		assert.equal($('.thinking').length, 1);
+		assert.equal($('.noactive').length, 0);
+	});
+
+	test('the indicator clears when the computer has played', async () => {
 		const { recv, text } = await boot();
 		await recv({ type: 'status', gameActive: true });
-		await recv({ type: 'turn', collectiveTurn: false });
-		assert.match(text(), /Waiting for opponent's turn/);
+		await recv({ type: 'thinking', thinking: true });
+		assert.match(text(), /Computer is thinking/);
+		await recv({ type: 'thinking', thinking: false });
+		assert.doesNotMatch(text(), /Computer is thinking/);
+		assert.match(text(), /You are/, 'falls back to the player identity strip');
 	});
 
 	test('renders the countdown only while time > 0', async () => {
@@ -240,12 +265,29 @@ describe('non-admin view', () => {
 });
 
 describe('admin view (#admin)', () => {
-	test('offers Start Game and sends start', async () => {
+	test('offers the three difficulty buttons and sends the choice', async () => {
 		const { text, sent, button, flush } = await boot({ hash: '#admin' });
-		assert.match(text(), /Start Game/);
-		button('Start Game').click();
-		await flush();
-		assert.deepEqual(sent.at(-1), { type: 'start' });
+		const t = text();
+		assert.match(t, /Start Easy/);
+		assert.match(t, /Start Medium/);
+		assert.match(t, /Start Difficult/);
+		assert.doesNotMatch(t, /Start Game/, 'the single button is gone');
+
+		for (const [label, level] of [
+			['Start Easy', 'easy'],
+			['Start Medium', 'medium'],
+			['Start Difficult', 'hard']
+		]) {
+			button(label).click();
+			await flush();
+			assert.deepEqual(sent.at(-1), { type: 'start', difficulty: level });
+		}
+	});
+
+	test('players are never offered the difficulty choice', async () => {
+		const { text } = await boot();
+		assert.match(text(), /Waiting for game start/);
+		assert.doesNotMatch(text(), /Start Easy|Start Medium|Start Difficult/);
 	});
 
 	test('shows the three ending buttons while the game is active', async () => {
@@ -267,20 +309,19 @@ describe('admin view (#admin)', () => {
 		}
 	});
 
-	test('admin_vote only fires when it is not the collective turn', async () => {
+	test('the admin only spectates — the computer plays O', async () => {
 		const { recv, sent, $, flush } = await boot({ hash: '#admin' });
 		await recv({ type: 'status', gameActive: true });
 
 		const before = sent.length;
 		$('button.tile')[2].click();
 		await flush();
-		assert.equal(sent.length, before, 'no message during the collective turn');
+		assert.equal(sent.length, before, 'nothing sent during the crowd turn');
 
 		await recv({ type: 'turn', collectiveTurn: false });
-		// a different tile: tile 2 is still inside its 1s cooldown from above
 		$('button.tile')[3].click();
 		await flush();
-		assert.deepEqual(sent.at(-1), { type: 'admin_vote', tile: 3 });
+		assert.equal(sent.length, before, 'and nothing sent on the computer turn either');
 	});
 
 	test('a clicked tile is disabled for its 1s cooldown', async () => {

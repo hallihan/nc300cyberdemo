@@ -5,10 +5,17 @@ const socketIo = require("socket.io");
 const path = require('path');
 var cors = require('cors');
 const { outcome, highestTile } = require('./lib/game');
+const { chooseMove, DIFFICULTIES } = require('./lib/ai');
 
 const port = process.env.PORT || 80;
 // Seconds the crowd gets to vote each round. Override to tune the demo pace.
 const roundSeconds = Number(process.env.ROUND_SECONDS) || 10;
+// How long the computer appears to "think" before playing.
+const computerDelayMs = Number(process.env.COMPUTER_DELAY_MS) || 2500;
+// Below this many engaged players the early close is disabled — with one or two
+// people voting, a round would otherwise end almost the moment it began.
+const minPlayersForSkip = Number(process.env.MIN_PLAYERS_FOR_SKIP) || 3;
+
 const app = express();
 app.use(cors());
 
@@ -31,6 +38,14 @@ let gameActive = false
 let collectiveTurn = true
 let end = false;
 let ending
+
+// Computer opponent
+let difficulty = 'hard'
+let aiState = { mistakeMade: false }
+let thinking = false
+// Bumped whenever the game changes underneath a scheduled move, so a pending
+// "think" cannot land on a board that has since been restarted.
+let moveToken = 0
 
 // Socket
 let clients = []
@@ -69,18 +84,21 @@ const sendStats = () => broadcast({
     entries: Object.keys(entries).length
 })
 
+const sendThinking = () => broadcast({type: "thinking", thinking: thinking})
+
 const io = socketIo(server); // < Interesting!
 io.on("connection", (socket) => {
     console.log("Client connected")
     socket.isAdmin = false
     clients.push(socket)
     markActive(socket)
-    socket.send({type: "status", gameActive: gameActive})
+    socket.send({type: "status", gameActive: gameActive, difficulty: difficulty})
     broadcast({type: "turn", collectiveTurn: collectiveTurn})
     if(end) {broadcast({type: "ending", ending: ending})}
     dirty = true
 
     broadcast({type: "entries", entries: entries})
+    socket.send({type: "thinking", thinking: thinking})
     sendStats()
 
     socket.on("message", (m)=> {
@@ -98,35 +116,37 @@ io.on("connection", (socket) => {
                     votedThisRound.add(socket.id)
                     markActive(socket) // voting re-engages a player who sat out
                     sendStats()
-                    // Everyone still engaged has had their say.
-                    if(gameActive && activeCount() > 0 && votedThisRound.size >= activeCount()) {
+                    // Everyone still engaged has had their say. Requires a
+                    // minimum turnout so a near-empty room can't race ahead.
+                    if(gameActive
+                        && activeCount() >= minPlayersForSkip
+                        && votedThisRound.size >= activeCount()) {
                         resolveCollectiveTurn()
                     }
                 }
             }
         }
-        if(d.type == "start") {
+        if(d.type == "start" && socket.isAdmin) {
+            difficulty = DIFFICULTIES.includes(d.difficulty) ? d.difficulty : 'hard'
+            aiState = { mistakeMade: false }
+            cancelPendingMove()
+            board = emptyBoard()
             gameActive = true;
             time = roundSeconds;
+            collectiveTurn = true;
+            end = false;
+            ending = "";
             votedThisRound = new Set()
             resetActivePlayers()
-            broadcast({type: "status", gameActive: gameActive})
+            broadcast({type: "board", board: board})
+            broadcast({type: "status", gameActive: gameActive, difficulty: difficulty})
+            broadcast({type: "turn", collectiveTurn: collectiveTurn})
+            broadcast({type: "ending", ending: ""})
             sendStats()
         }
-        if(d.type == "ending") {
+        if(d.type == "ending" && socket.isAdmin) {
+            cancelPendingMove()
             declareEnding(d.ending)
-        }
-        if(d.type == "admin_vote") {
-            if(board[d.tile].state == "" && !collectiveTurn) {
-                board[d.tile].state = "o"
-                dirty = true
-                collectiveTurn = true;
-                time = roundSeconds;
-                votedThisRound = new Set()
-                broadcast({type: "turn", collectiveTurn: collectiveTurn})
-                sendStats()
-                checkOutcome()
-            }
         }
         if(d.type == "entry") {
             console.log(JSON.stringify(d))
@@ -134,7 +154,8 @@ io.on("connection", (socket) => {
             broadcast({type: "entries", entries: entries})
             sendStats()
         }
-        if(d.type == "restart") {
+        if(d.type == "restart" && socket.isAdmin) {
+            cancelPendingMove()
             board = emptyBoard()
             time = 0;
             dirty = true;
@@ -142,15 +163,16 @@ io.on("connection", (socket) => {
             end = false;
             ending = "";
             collectiveTurn = true;
+            aiState = { mistakeMade: false }
             votedThisRound = new Set()
             resetActivePlayers()
             broadcast({type: "board", board: board})
-            broadcast({type: "status", gameActive: gameActive})
+            broadcast({type: "status", gameActive: gameActive, difficulty: difficulty})
             broadcast({type: "turn", collectiveTurn: collectiveTurn})
             broadcast({type: "ending", ending: ""})
             sendStats()
         }
-        if(d.type == "reset_entries") {
+        if(d.type == "reset_entries" && socket.isAdmin) {
             entries = {}
             broadcast({type: "entries", entries: entries})
             sendStats()
@@ -171,13 +193,14 @@ const declareEnding = (code) => {
     end = true;
     ending = code
     board.forEach(t=>t.votes = 0)
+    if(thinking) { thinking = false; sendThinking() }
     broadcast({type: "board", board: board})
     broadcast({type: "ending", ending: ending})
     broadcast({type: "entries", entries: entries})
 }
 
-// The server now decides the result itself rather than waiting for the admin
-// to judge it. The manual buttons still work as an override.
+// The server decides the result itself rather than waiting for a human to
+// judge it. The manual buttons remain as an override.
 const checkOutcome = () => {
     const result = outcome(board)
     if(result) {
@@ -187,7 +210,13 @@ const checkOutcome = () => {
     return false
 }
 
-// Claim the winning tile for the crowd and hand the turn to the admin.
+// Invalidates any scheduled computer move.
+const cancelPendingMove = () => {
+    moveToken++
+    if(thinking) { thinking = false; sendThinking() }
+}
+
+// Claim the winning tile for the crowd, then hand over to the computer.
 const resolveCollectiveTurn = () => {
     const tile = highestTile(board)
     if(tile) tile.state = "x"
@@ -208,6 +237,37 @@ const resolveCollectiveTurn = () => {
     collectiveTurn = false;
     broadcast({type: "turn", collectiveTurn: collectiveTurn})
     sendStats()
+    scheduleComputerMove()
+}
+
+// The computer pauses before playing so the room can watch it "think".
+const scheduleComputerMove = () => {
+    const token = ++moveToken
+    thinking = true
+    sendThinking()
+    setTimeout(() => {
+        if(token !== moveToken || end || collectiveTurn) return
+        thinking = false
+        sendThinking()
+        playComputerMove()
+    }, computerDelayMs)
+}
+
+const playComputerMove = () => {
+    const move = chooseMove(board, difficulty, aiState)
+    if(move) {
+        board[move.index].state = "o"
+        broadcast({type: "board", board: board})
+    }
+    if(checkOutcome()) {
+        sendStats()
+        return
+    }
+    collectiveTurn = true;
+    time = roundSeconds;
+    votedThisRound = new Set()
+    broadcast({type: "turn", collectiveTurn: collectiveTurn})
+    sendStats()
 }
 
 var previousTime = 0
@@ -217,7 +277,9 @@ setInterval(() => {
             dirty = false
             broadcast({type: "board", board: board})
         }
-        if(time > 0 && gameActive) time --
+        // The clock only runs during the crowd's turn, so the computer's
+        // thinking pause doesn't eat into the next round.
+        if(time > 0 && gameActive && collectiveTurn) time --
         if(time != previousTime) broadcast({type: "time", time: time})
         previousTime = time
         if(time == 0 && collectiveTurn && gameActive) {
