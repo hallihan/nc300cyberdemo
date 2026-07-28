@@ -207,6 +207,16 @@
 	{:else}
 		<p class="">Connecting...</p>
 	{/if}
+
+	<!-- Fixed corner card, outside the connected/overlay branches, so it shows
+	     on every admin view — start screen, mid-game and the result overlay —
+	     and lets students join at any point. -->
+	{#if admin}
+		<div class="join-qr">
+			<img src="/cyberdemo.png" alt="QR code linking to the game" />
+			<span>Scan to join</span>
+		</div>
+	{/if}
 </main>
 
 <style>
@@ -375,6 +385,39 @@
 			animation: none;
 			opacity: 0.7;
 		}
+	}
+
+	/* z-index clears .noactive (1000) so the code stays scannable while the
+	   start menu or a result overlay is up. */
+	.join-qr {
+		position: fixed;
+		right: 16px;
+		bottom: 16px;
+		z-index: 1001;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 6px;
+		padding: 10px;
+		border-radius: 8px;
+		/* QR codes need dark modules on a light field to scan reliably */
+		background: #eceff4;
+		box-shadow: 0 2px 14px rgba(0, 0, 0, 0.45);
+	}
+
+	.join-qr img {
+		display: block;
+		width: 180px;
+		height: 180px;
+		/* the source is 99x99, so keep the modules hard-edged when scaled up */
+		image-rendering: pixelated;
+	}
+
+	.join-qr span {
+		font-size: 13px;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: #2e3440;
 	}
 
 	.you-are {

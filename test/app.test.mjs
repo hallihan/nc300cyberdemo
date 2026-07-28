@@ -133,6 +133,38 @@ describe('identify + round stats', () => {
 		assert.deepEqual(second, first, 'same fingerprint fields');
 	});
 
+	test('the join QR is on every admin view', async () => {
+		const { recv, $ } = await boot({ hash: '#admin' });
+		const qr = () => $('.join-qr img')[0];
+
+		// start screen
+		assert.ok(qr(), 'present before the game starts');
+		assert.equal(qr().getAttribute('src'), '/cyberdemo.png');
+		assert.ok(qr().getAttribute('alt'), 'has alt text');
+
+		// mid-game
+		await recv({ type: 'status', gameActive: true });
+		assert.ok(qr(), 'present during play');
+
+		// while the computer thinks
+		await recv({ type: 'thinking', thinking: true });
+		assert.ok(qr(), 'present while thinking');
+
+		// result overlay
+		await recv({ type: 'thinking', thinking: false });
+		await recv({ type: 'ending', ending: 'x' });
+		assert.ok(qr(), 'present on the result screen');
+	});
+
+	test('players never see the join QR', async () => {
+		const { recv, $ } = await boot();
+		assert.equal($('.join-qr').length, 0);
+		await recv({ type: 'status', gameActive: true });
+		assert.equal($('.join-qr').length, 0);
+		await recv({ type: 'ending', ending: 'x' });
+		assert.equal($('.join-qr').length, 0, 'they already joined');
+	});
+
 	test('a normal client identifies itself as non-admin', async () => {
 		const { sent } = await boot();
 		assert.deepEqual(sent[0], { type: 'identify', admin: false });

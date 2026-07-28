@@ -19,6 +19,9 @@ const minPlayersForSkip = Number(process.env.MIN_PLAYERS_FOR_SKIP) || 3;
 
 const app = express();
 app.use(cors());
+// Static assets: the join QR code, and favicon.png — which index.html has
+// always referenced but nothing ever served, so it 404'd until now.
+app.use(express.static(path.join(__dirname, 'public')));
 
 var entries = {
 
