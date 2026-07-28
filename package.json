@@ -4,18 +4,26 @@
   "description": "NC-300 Cyber Demo",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vite build && node --test --test-concurrency=1 test/*.test.mjs"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.17.1",
-    "socket.io": "^4.1.2"
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "socket.io": "^4.8.3"
   },
   "devDependencies": {
-    "socket.io-client": "^4.1.2"
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "jsdom": "^30.0.0",
+    "socket.io-client": "^4.8.3",
+    "svelte": "^5.56.8",
+    "ua-parser-js": "^2.0.10",
+    "vite": "^8.1.5"
   },
   "engines": {
-    "node": "14.x"
+    "node": ">=24.0.0"
   },
   "license": "MIT",
   "keywords": []
