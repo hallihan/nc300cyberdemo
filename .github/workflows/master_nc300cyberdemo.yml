@@ -19,8 +19,9 @@ jobs:
       - name: Set up Node.js version
         uses: actions/setup-node@v4
         with:
-          # Vite 8 requires ^20.19 || >=22.12; 18.x cannot run the build.
-          node-version: '22.x'
+          # Node 24 "Krypton" is the current LTS. jsdom 30 needs >=24.15,
+          # and Vite 8 needs >=20.19, so 24.x satisfies the whole toolchain.
+          node-version: '24.x'
 
       - name: npm install, build, and test
         run: |

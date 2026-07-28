@@ -10,19 +10,19 @@
     "test": "vite build && node --test test/*.test.mjs"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.17.1",
-    "socket.io": "^4.1.2"
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "socket.io": "^4.8.3"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.2.0",
-    "jsdom": "^29.1.1",
-    "socket.io-client": "^4.1.2",
+    "jsdom": "^30.0.0",
+    "socket.io-client": "^4.8.3",
     "svelte": "^5.56.8",
     "vite": "^8.1.5"
   },
   "engines": {
-    "node": "^20.19.0 || >=22.12.0"
+    "node": ">=24.0.0"
   },
   "license": "MIT",
   "keywords": []
